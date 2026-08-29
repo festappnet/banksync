@@ -22,6 +22,7 @@ import {
   insertWebhookLogEntry,
   writeEvent,
   pruneRetention,
+  getStatusData,
 } from './db';
 import type { Transaction } from './types';
 import * as loggerModule from './logger';
@@ -547,6 +548,20 @@ describe('writeEvent + pruneRetention', () => {
     // Verify non-expired rows survived
     const parseSurvived = (sqlite.prepare(`SELECT COUNT(*) as n FROM parse_log`).get() as { n: number }).n;
     expect(parseSurvived).toBe(1);
+  });
+});
+
+describe('status parse-failure classification', () => {
+  it('does not count authentication rejections as parser failures', async () => {
+    const { db, sqlite } = makeTestDbWithSqlite();
+    sqlite.prepare(`INSERT INTO parse_log (error_message) VALUES
+      ('email_identity_mismatch'),
+      ('email_ingest_disabled_untrusted_authserv'),
+      ('parse_failed')`).run();
+
+    const status = await getStatusData(db);
+
+    expect(status.service.parse_failures_24h).toBe(1);
   });
 });
 

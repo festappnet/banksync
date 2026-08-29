@@ -108,6 +108,26 @@ export async function detectStalledIncidents(db: D1Database, service: string): P
       payload: incidentPayload('stalled', job, service),
     });
   }
+  // A delivery can complete after the stalled row is created but before that
+  // row is posted. The transition hook cannot close an incident that was not
+  // visible yet, so reconcile delivered jobs after the durable alert post.
+  const recovered = await db.prepare(`
+    SELECT DISTINCT j.id, j.delivery_id, j.consumer_app_id, j.incident_version,
+           j.last_error, j.last_http_status, j.status
+    FROM webhook_delivery_jobs j
+    JOIN webhook_delivery_alerts a ON a.delivery_job_id = j.id
+    WHERE j.status = 'delivered'
+      AND a.incident_kind IN ('terminal', 'stalled')
+      AND a.posted_at IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM webhook_delivery_alerts r
+        WHERE r.delivery_job_id = a.delivery_job_id
+          AND r.incident_kind = 'recovered'
+          AND r.incident_key = 'job:' || a.delivery_job_id || ':recovered:' || a.id
+      )
+    LIMIT 100
+  `).all<AlertJobFacts>();
+  for (const job of recovered.results) await enqueueRecoveryIfOpen(db, job, service);
   return rows.results.length;
 }
 
