@@ -3,6 +3,12 @@ name: Release
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact protected package version to publish
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -30,8 +36,8 @@ jobs:
           package-manager-cache: false
       - name: Install the minimum trusted-publishing npm CLI
         run: |
-          npm install --global npm@11.5.1
-          test "$(npm --version)" = "11.5.1"
+          npm install --global npm@11.17.0
+          test "$(npm --version)" = "11.17.0"
       - name: Require the protected tag to equal the package version
         shell: bash
         run: |
@@ -39,6 +45,9 @@ jobs:
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main
           PACKAGE_VERSION=$(node -p "require('./package.json').version")
           test "$GITHUB_REF_NAME" = "v$PACKAGE_VERSION"
+          if test "$GITHUB_EVENT_NAME" = "workflow_dispatch"; then
+            test "${{ inputs.version }}" = "$PACKAGE_VERSION"
+          fi
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
       - run: pnpm audit --prod --audit-level low

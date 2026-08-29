@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: banksync-release-promotion
@@ -53,3 +54,9 @@ jobs:
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git tag -a "v$REQUESTED_VERSION" -m "Release v$REQUESTED_VERSION" "$GITHUB_SHA"
           git push origin "refs/tags/v$REQUESTED_VERSION"
+      - name: Dispatch the trusted-publishing workflow from the protected tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: gh workflow run release.yml --ref "v$REQUESTED_VERSION" -f version="$REQUESTED_VERSION"
