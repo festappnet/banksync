@@ -85,6 +85,19 @@ describe('alert outbox', () => {
     sqlite.prepare(`UPDATE webhook_delivery_jobs SET created_at = datetime('now')`).run();
   });
 
+  it('reconciles delivery that completed before its stalled alert was posted', async () => {
+    const { db, sqlite } = setup({ status: 'delivered' });
+    sqlite.prepare(`INSERT INTO webhook_delivery_alerts
+      (delivery_job_id, incident_kind, incident_key, payload, posted_at)
+      VALUES (1, 'stalled', 'job:1:stalled:0', '{}', datetime('now'))`).run();
+
+    await detectStalledIncidents(db, 'banksync');
+
+    expect(alerts(sqlite).filter(a => a.incident_kind === 'recovered')).toEqual([
+      expect.objectContaining({ incident_key: 'job:1:recovered:1' }),
+    ]);
+  });
+
   it('drains due alerts, marks posted, and does not double-post under a claim lease', async () => {
     const { db, sqlite } = setup();
     sqlite.prepare(`INSERT INTO webhook_delivery_alerts (delivery_job_id, incident_kind, incident_key, payload) VALUES (1, 'terminal', 'job:1:terminal:0', '{"x":1}')`).run();

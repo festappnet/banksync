@@ -771,7 +771,10 @@ const SQL_COUNT_CONSUMERS = `SELECT COUNT(*) as cnt FROM webhook_consumers`;
 const SQL_LAST_TX_AT = `SELECT MAX(created_at) as ts FROM transactions`;
 const SQL_LAST_EMAIL_AT = `SELECT MAX(created_at) as ts FROM event_log WHERE event_type = 'tx_inserted'`;
 const SQL_PARSE_ERRORS_24H = `SELECT COUNT(*) as cnt FROM parse_log WHERE created_at > datetime('now','-1 day')`;
-const SQL_PARSE_FAILURES_24H = `SELECT COUNT(*) as cnt FROM parse_log WHERE created_at > datetime('now','-1 day') AND error_message NOT LIKE 'not_transaction:%'`;
+const SQL_PARSE_FAILURES_24H = `SELECT COUNT(*) as cnt FROM parse_log
+  WHERE created_at > datetime('now','-1 day')
+    AND error_message NOT LIKE 'not_transaction:%'
+    AND error_message NOT IN ('email_identity_mismatch', 'email_ingest_disabled_untrusted_authserv')`;
 const SQL_NOT_TRANSACTION_24H = `SELECT COUNT(*) as cnt FROM parse_log WHERE error_message LIKE 'not_transaction:%' AND created_at > datetime('now','-1 day')`;
 const SQL_TX_INSERTED_24H = `SELECT COUNT(*) as cnt FROM event_log WHERE event_type = 'tx_inserted' AND created_at > datetime('now','-1 day')`;
 const SQL_UNKNOWN_CURRENCY_24H = `SELECT COUNT(*) as cnt FROM parse_log WHERE error_message LIKE 'unknown_currency:%' AND created_at > datetime('now','-1 day')`;
