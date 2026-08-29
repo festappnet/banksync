@@ -1,0 +1,3 @@
+ADMIN_SECRET=replace-with-a-long-random-value
+WEBHOOK_KEK=replace-with-32-byte-base64
+ENCRYPTION_KEY_V1=replace-with-different-32-byte-base64

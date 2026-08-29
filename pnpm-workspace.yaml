@@ -1,0 +1,10 @@
+packages:
+  - .
+
+allowBuilds:
+  '@cloudflare/unenv-preset': false
+  '@vitest/mocker': false
+  better-sqlite3: true
+  esbuild: true
+  miniflare: false
+  workerd: true

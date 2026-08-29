@@ -1,0 +1,14 @@
+# wrangler / cloudflare local state
+.wrangler/
+wrangler.toml
+.dev.vars
+.dev.vars.local
+node_modules/
+dist/
+*.log
+*.tgz
+.DS_Store
+
+# better-sqlite3 native artifacts
+build/
+prebuilds/

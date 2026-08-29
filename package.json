@@ -1,0 +1,61 @@
+{
+  "name": "@festapp/banksync",
+  "version": "0.1.0",
+  "description": "Bank transaction ingestion for Cloudflare Workers: Czech bank email and Fio API parsing, durable deduplication, and signed webhook delivery.",
+  "type": "module",
+  "packageManager": "pnpm@11.24.0",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/festappnet/banksync.git"
+  },
+  "homepage": "https://github.com/festappnet/banksync#readme",
+  "bugs": "https://github.com/festappnet/banksync/issues",
+  "files": [
+    "dist",
+    "migrations",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./cloudflare": {
+      "types": "./dist/cloudflare.d.ts",
+      "import": "./dist/cloudflare.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts src/cloudflare.ts --format esm --dts --clean --splitting",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "check": "pnpm typecheck && pnpm test && pnpm build",
+    "prepack": "pnpm build"
+  },
+  "dependencies": {
+    "postal-mime": "^2.7.5",
+    "ulid": "^2.3.0",
+    "valibot": "^1.2.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260730.1",
+    "@types/better-sqlite3": "^7.6.13",
+    "better-sqlite3": "^12.11.1",
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.3",
+    "vite": "^6.4.2",
+    "vitest": "^4.1.5",
+    "wrangler": "4.118.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

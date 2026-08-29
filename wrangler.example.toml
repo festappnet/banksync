@@ -1,0 +1,48 @@
+name = "banksync"
+main = "src/cloudflare.ts"
+compatibility_date = "2025-05-08"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "replace-with-d1-name"
+database_id = "replace-with-d1-id"
+migrations_dir = "migrations"
+
+[[queues.producers]]
+binding = "WEBHOOK_QUEUE"
+queue = "replace-with-webhook-queue"
+
+[[queues.producers]]
+binding = "API_SYNC_QUEUE"
+queue = "replace-with-api-sync-queue"
+
+[[queues.consumers]]
+queue = "replace-with-webhook-queue"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 8
+dead_letter_queue = "replace-with-webhook-dlq"
+
+[[queues.consumers]]
+queue = "replace-with-webhook-dlq"
+max_batch_size = 10
+max_batch_timeout = 30
+max_retries = 1
+
+[[queues.consumers]]
+queue = "replace-with-api-sync-queue"
+max_batch_size = 1
+max_batch_timeout = 1
+max_retries = 3
+retry_delay = 30
+
+[triggers]
+crons = ["* * * * *", "15 3 * * *"]
+
+[vars]
+SENDER_ALLOWLIST = "@fio.cz,@airbank.cz"
+ENV = "production"
+BANKSYNC_DOMAIN = "banksync.example.com"
+FIO_MIN_INTERVAL_S = "30"
+ENCRYPTION_KEY_VERSION = "1"
