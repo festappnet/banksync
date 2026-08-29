@@ -11,7 +11,7 @@ import type {
 import { extractEmailBody } from './mime';
 import type { ExtractedEmail } from './mime';
 import { classifyEmail, extractPairingCode, parseAllowlist } from './email_classify';
-import { authenticateEmailIdentity, EmailAuthenticationError, type EmailEnvelopeEvidence } from './email_auth';
+import { authenticateEmailIdentity, EmailAuthenticationError, inspectAuthenticationResults, type EmailEnvelopeEvidence } from './email_auth';
 import { decryptSecret, encryptSecret, webhookEncrypt, type VersionedSecretEnv } from './crypto';
 import {
   assertSchemaVersion,
@@ -1381,8 +1381,14 @@ export default {
 
     const trustedAuthservId = env.EMAIL_AUTHSERV_ID?.trim();
     if (!trustedAuthservId) {
+      const inspection = inspectAuthenticationResults(message.headers.get('authentication-results'));
       await insertParseLog(env.DB, { error_message: 'email_ingest_disabled_untrusted_authserv', raw_data: null });
-      log('email_rejected_authentication', { reason: 'trusted_authserv_not_configured' });
+      log('email_rejected_authentication', {
+        reason: 'trusted_authserv_not_configured',
+        authentication_results_present: message.headers.has('authentication-results'),
+        observed_authserv_id: inspection.observedAuthservId,
+        authentication_results_ambiguous: inspection.ambiguous,
+      });
       return;
     }
     await processEmail(message.raw as unknown as ReadableStream<Uint8Array>, env, {
