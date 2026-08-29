@@ -61,6 +61,8 @@ function jobStatus(sqlite: Database.Database): string {
   return (sqlite.prepare(`SELECT status FROM webhook_delivery_jobs`).get() as { status: string }).status;
 }
 
+const receipt = { receipt_version: 1 as const, delivery_id: 'D', outcome: 'already_paid', order_id: 'order-1' };
+
 describe('WebhookDeliveryCoordinator (interface)', () => {
   it('observeTransaction creates and dispatches one job', async () => {
     const { db, sqlite, send } = setup();
@@ -73,11 +75,22 @@ describe('WebhookDeliveryCoordinator (interface)', () => {
 
   it('handleAttempt: 2xx acks and marks delivered', async () => {
     const { db, sqlite, send } = setup();
-    const c = createWebhookDeliveryCoordinator({ DB: db, WEBHOOK_KEK: 'k', WEBHOOK_QUEUE: { send } as unknown as Queue<WebhookQueueMessage> }, { sender: fakeSender({ kind: 'http', httpStatus: 200, usedPrevSecret: false, primaryStatus: null }) });
+    const c = createWebhookDeliveryCoordinator({ DB: db, WEBHOOK_KEK: 'k', WEBHOOK_QUEUE: { send } as unknown as Queue<WebhookQueueMessage> }, { sender: fakeSender({ kind: 'http', httpStatus: 200, usedPrevSecret: false, primaryStatus: null, receipt }) });
     await c.observeTransaction(1);
     const disp = await c.handleAttempt(messageFor(sqlite), { attempts: 1, source: 'primary' });
     expect(disp).toEqual({ action: 'ack' });
     expect(jobStatus(sqlite)).toBe('delivered');
+    expect(sqlite.prepare(`SELECT business_outcome, business_outcome_version, receipt_json FROM webhook_delivery_jobs`).get())
+      .toEqual({ business_outcome: 'already_paid', business_outcome_version: 1, receipt_json: JSON.stringify(receipt) });
+  });
+
+  it('handleAttempt: 2xx without a durable receipt remains retryable', async () => {
+    const { db, sqlite, send } = setup();
+    const c = createWebhookDeliveryCoordinator({ DB: db, WEBHOOK_KEK: 'k', WEBHOOK_QUEUE: { send } as unknown as Queue<WebhookQueueMessage> }, { sender: fakeSender({ kind: 'http', httpStatus: 200, usedPrevSecret: false, primaryStatus: null }) });
+    await c.observeTransaction(1);
+    const disp = await c.handleAttempt(messageFor(sqlite), { attempts: 1, source: 'primary' });
+    expect(disp).toMatchObject({ action: 'retry' });
+    expect(jobStatus(sqlite)).toBe('queued');
   });
 
   it('handleAttempt: 500 returns a retry disposition', async () => {
