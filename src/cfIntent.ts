@@ -61,7 +61,7 @@ export async function deprovisionRoute(db: D1Database, cfg: CfRoutingConfig, cfR
 
 export type RegenerateResult =
   | { ok: true; account: BankAccount }
-  | { ok: false; status: number; body: Record<string, unknown> };
+  | { ok: false; status: number; body: { error: 'cf_routing_create_failed' | 'not_found' } };
 
 /**
  * Zero-downtime pairing rotation: create the NEW CF rule FIRST (so no inbound
@@ -82,7 +82,7 @@ export async function regenerateRoute(
   } catch (err) {
     logError('cf_routing_create_failed_on_regen', err, { id: args.id, pairing_code: args.newPairing });
     const status = err instanceof CfRoutingError ? 503 : 500;
-    return { ok: false, status, body: { error: 'cf_routing_create_failed', detail: String(err) } };
+    return { ok: false, status, body: { error: 'cf_routing_create_failed' } };
   }
 
   let account: BankAccount | null;
