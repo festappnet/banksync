@@ -74,7 +74,8 @@ describe('regenerateRoute — zero-downtime create-before-delete', () => {
 
     const result = await regenerateRoute(fakeDb, fakeCfg, { id: 7, existingCfRuleId: 'old-rule-id', newPairing: 'cafebabe01' });
 
-    expect(result).toEqual({ ok: false, status: 503, body: { error: 'cf_routing_create_failed', detail: expect.stringContaining('cf down') } });
+    expect(result).toEqual({ ok: false, status: 503, body: { error: 'cf_routing_create_failed' } });
+    expect(JSON.stringify(result)).not.toContain('cf down');
     expect(regenPairing).not.toHaveBeenCalled();
     expect(safeDeleteRule).not.toHaveBeenCalled();
   });
