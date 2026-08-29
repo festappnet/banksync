@@ -111,13 +111,13 @@ the attacker's consumer to another tenant's account.
 
 ### Execution evidence (2026-08-29)
 
-- Local source hardening passes 29 Vitest files / 539 tests, typecheck, dual
+- Local source hardening passes 29 Vitest files / 544 tests, typecheck, dual
   ESM/CommonJS build and load smoke,
   production dependency audit, Wrangler Worker dry-run, and both fresh and
   recorded-0001–0009-to-0010 disposable Wrangler D1 migration flows.
 - Two independent `npm pack --ignore-scripts` runs produced byte-identical
   `festapp-banksync-0.1.2.tgz` with SHA-256
-  `b4da935a479dfc562c4df5f87a110f56ae473f8ae8b4388ce09e6191b0dcfd1d`.
+  `474452afc374f9b6e647ac705572997fd352901ff6bc0f9ea6e485147495f941`.
   It contains only `0001_schema.sql` and `0010_security_hardening.sql` under
   `migrations/`, contains both module-system entry points, and has no weak
   verifier export.
