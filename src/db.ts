@@ -736,7 +736,8 @@ export async function listParseLog(db: D1Database, since: string, limit: number,
 }
 
 // Unmatched mails: parse_log entries where pairing routing failed (mail reached worker but no bank account matched).
-// Includes raw_data so admin can inspect actual sender / subject / body to decide whether to register a new account or block sender.
+// raw_data contains only the bounded, masked diagnostic projection prepared by
+// the ingress boundary; raw MIME and address identity are never exposed here.
 const SQL_LIST_UNMATCHED_MAILS = `SELECT id, external_id, error_message, raw_data, created_at FROM parse_log WHERE (error_message LIKE 'no_pairing_code:%' OR error_message LIKE 'unknown_pairing_code:%') AND created_at > datetime(?) ORDER BY id DESC LIMIT ?`;
 
 export async function listUnmatchedMails(db: D1Database, since: string, limit: number): Promise<Array<{
