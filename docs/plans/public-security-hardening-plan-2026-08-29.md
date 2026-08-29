@@ -1,7 +1,7 @@
 # Secure BankSync public release
 
 Date: 2026-08-29  
-Status: Ready for execution  
+Status: Source/repository hardening complete; publication and production cutover pending
 Verification: release
 
 ## Outcome
@@ -111,26 +111,40 @@ the attacker's consumer to another tenant's account.
 
 ### Execution evidence (2026-08-29)
 
-- Local source hardening passes 28 Vitest files / 530 tests, typecheck, build,
+- Local source hardening passes 29 Vitest files / 539 tests, typecheck, dual
+  ESM/CommonJS build and load smoke,
   production dependency audit, Wrangler Worker dry-run, and both fresh and
   recorded-0001–0009-to-0010 disposable Wrangler D1 migration flows.
 - Two independent `npm pack --ignore-scripts` runs produced byte-identical
   `festapp-banksync-0.1.2.tgz` with SHA-256
-  `0531be239d33ee543bfaa34b9b97a1da093c1106beed64dccb305af3fbaec57d`.
+  `b4da935a479dfc562c4df5f87a110f56ae473f8ae8b4388ce09e6191b0dcfd1d`.
   It contains only `0001_schema.sql` and `0010_security_hardening.sql` under
-  `migrations/` and has no weak verifier export.
+  `migrations/`, contains both module-system entry points, and has no weak
+  verifier export.
 - Read-only production checks still show the old state: deployment version
-  `e525ef60-ebd7-423e-ade2-02d8018de819` at 100%, D1 schema version 9,
+  `c4207046-6d0b-4037-a1a7-c142db7619ce` at 100% (secret-only revision of the
+  old code), D1 schema version 9,
   anonymous `/status` and `/health/deep` returning 200, and two active
-  cross-owner subscriptions. No credential-shaped idempotency row was found.
-- Callback host-only inventory returned `httpbin.org`, `maturita.festapp.net`,
-  `mendelio.net`, `muzazena.festapp.net`, and `voice.mendelio.net`; each requires
-  explicit operator approval before allowlist enforcement, especially the
-  apparent test host.
-- GitHub still has no ruleset or main protection, secret scanning/push
-  protection and Dependabot security updates are disabled, and npm returns 404
-  for `@festapp/banksync`. Those external controls and publication remain
-  intentionally unapplied without separate authority.
+  cross-owner subscriptions. Both are approved Mendelio platform sharing
+  (`tutoring` account owner to the `dating` and `voice` consumers). No
+  credential-shaped idempotency row was found.
+- The production callback allowlist is resolved to the three exact active
+  hosts: `mendelio.net`, `muzazena.festapp.net`, and `voice.mendelio.net`.
+  Four `httpbin.org` E2E consumers and the `maturita.festapp.net` legacy
+  consumer have zero active subscriptions and remain cleanup candidates, not
+  allowlist entries.
+- GitHub main and `v*` tags are protected by active rulesets; required build,
+  dependency review, secrets, and CodeQL checks are enforced. Secret scanning,
+  push protection, Dependabot security updates, and private vulnerability
+  reporting are enabled. All workflow actions are pinned to full commit SHAs.
+- `@festapp/banksync` is the canonical npm identity. A bootstrap package was
+  fully unpublished during namespace setup, so npm enforces its documented
+  24-hour same-name cooldown; publication cannot resume before approximately
+  2026-08-30 15:43 CEST. No stable npm version or `v0.1.2` tag exists yet.
+- Production has `BACKUP_ENCRYPTION_KEY_V1`; the same restore key is held
+  independently outside Cloudflare. `EMAIL_AUTHSERV_ID` intentionally remains
+  unset until accepted/rejected production evidence establishes the trusted
+  Cloudflare authserv-id.
 
 ## Target architecture and invariants
 
