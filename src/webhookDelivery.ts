@@ -1,7 +1,7 @@
 import type { D1Database, Queue } from '@cloudflare/workers-types';
 import { ulid } from 'ulid';
 import { buildWebhookEnvelope } from './relay';
-import type { Transaction, WebhookEnvelope } from './types';
+import type { Transaction, WebhookDeliveryReceipt, WebhookEnvelope } from './types';
 import type { WebhookQueueMessage } from './queue';
 import {
   MAX_AUTOMATIC_HTTP_ATTEMPTS,
@@ -273,6 +273,7 @@ export async function recordDeliveryOutcome(db: D1Database, args: {
   error?: string | null;
   delaySeconds?: number;
   alertService?: string;
+  receipt?: WebhookDeliveryReceipt;
 }): Promise<OutcomeResult> {
   const { deliveryJobId, generation, dispatchToken, kind } = args;
   const httpStatus = args.httpStatus ?? null;
@@ -285,9 +286,17 @@ export async function recordDeliveryOutcome(db: D1Database, args: {
       UPDATE webhook_delivery_jobs
       SET status = 'delivered', http_attempt_count = http_attempt_count + 1,
           lease_until = NULL, last_http_status = ?, last_error = NULL,
+          business_outcome = ?, business_outcome_version = ?, receipt_json = ?,
           delivered_at = datetime('now')
       WHERE id = ? AND generation = ? AND status <> 'delivered'
-    `).bind(httpStatus, deliveryJobId, generation).run();
+    `).bind(
+      httpStatus,
+      args.receipt?.outcome ?? null,
+      args.receipt?.receipt_version ?? null,
+      args.receipt ? JSON.stringify(args.receipt) : null,
+      deliveryJobId,
+      generation,
+    ).run();
     changes = res.meta.changes;
   } else if (kind === 'queue_retry') {
     // Cloudflare still owns this message and will make the next retry. Hold the

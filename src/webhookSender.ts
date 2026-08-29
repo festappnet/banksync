@@ -1,5 +1,5 @@
 import type { D1Database } from '@cloudflare/workers-types';
-import type { WebhookEnvelope } from './types';
+import type { WebhookDeliveryReceipt, WebhookEnvelope } from './types';
 import { webhookDecrypt } from './crypto';
 import { signWebhook } from './relay';
 import { getConsumerSecretMaterials } from './db';
@@ -23,7 +23,14 @@ export type SenderResult =
   | { kind: 'no_consumer' }
   | { kind: 'configuration_error'; error: 'consumer_secret_decrypt_failed' | 'callback_url_not_allowed' }
   | { kind: 'network_error'; error: string; usedPrevSecret: boolean }
-  | { kind: 'http'; httpStatus: number; usedPrevSecret: boolean; primaryStatus: number | null };
+  | {
+      kind: 'http';
+      httpStatus: number;
+      usedPrevSecret: boolean;
+      primaryStatus: number | null;
+      receipt?: WebhookDeliveryReceipt;
+      receiptError?: 'receipt_missing' | 'receipt_too_large' | 'receipt_invalid' | 'receipt_read_failed';
+    };
 
 export interface WebhookSenderEnv {
   DB: D1Database;
@@ -33,6 +40,66 @@ export interface WebhookSenderEnv {
 }
 
 const FETCH_TIMEOUT_MS = 10_000;
+const MAX_RECEIPT_BYTES = 8 * 1024;
+
+async function readReceipt(response: Response, deliveryId: string): Promise<
+  { receipt: WebhookDeliveryReceipt } | { error: NonNullable<Extract<SenderResult, { kind: 'http' }>['receiptError']> }
+> {
+  const contentLength = Number(response.headers.get('content-length'));
+  if (Number.isFinite(contentLength) && contentLength > MAX_RECEIPT_BYTES) return { error: 'receipt_too_large' };
+  if (!response.body) return { error: 'receipt_missing' };
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_RECEIPT_BYTES) {
+        await reader.cancel();
+        return { error: 'receipt_too_large' };
+      }
+      chunks.push(value);
+    }
+  } catch {
+    return { error: 'receipt_read_failed' };
+  }
+  if (total === 0) return { error: 'receipt_missing' };
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    const parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as Record<string, unknown>;
+    if (parsed.ok !== true || parsed.receipt_version !== 1 || parsed.delivery_id !== deliveryId
+      || typeof parsed.outcome !== 'string' || !/^[a-z0-9_]{1,64}$/.test(parsed.outcome)
+      || (parsed.order_id !== undefined && (typeof parsed.order_id !== 'string' || parsed.order_id.length > 200))) {
+      return { error: 'receipt_invalid' };
+    }
+    const receipt: WebhookDeliveryReceipt = {
+      receipt_version: 1,
+      delivery_id: parsed.delivery_id,
+      outcome: parsed.outcome,
+    };
+    if (typeof parsed.order_id === 'string') receipt.order_id = parsed.order_id;
+    return { receipt };
+  } catch {
+    return { error: 'receipt_invalid' };
+  }
+}
+
+async function httpResult(response: Response, deliveryId: string, usedPrevSecret: boolean, primaryStatus: number | null): Promise<SenderResult> {
+  if (response.status < 200 || response.status > 299) {
+    return { kind: 'http', httpStatus: response.status, usedPrevSecret, primaryStatus };
+  }
+  const parsed = await readReceipt(response, deliveryId);
+  return 'receipt' in parsed
+    ? { kind: 'http', httpStatus: response.status, usedPrevSecret, primaryStatus, receipt: parsed.receipt }
+    : { kind: 'http', httpStatus: response.status, usedPrevSecret, primaryStatus, receiptError: parsed.error };
+}
 
 async function postSigned(url: string, envelope: WebhookEnvelope, secret: string): Promise<Response> {
   const signed = await signWebhook({ envelope, secret });
@@ -96,10 +163,10 @@ export function createWebhookSender(env: WebhookSenderEnv): WebhookSender {
         } catch (err) {
           return { kind: 'network_error', error: String(err), usedPrevSecret: true };
         }
-        return { kind: 'http', httpStatus: prev.status, usedPrevSecret: true, primaryStatus: primary.status };
+        return httpResult(prev, job.delivery_id, true, primary.status);
       }
 
-      return { kind: 'http', httpStatus: primary.status, usedPrevSecret: false, primaryStatus: null };
+      return httpResult(primary, job.delivery_id, false, null);
     },
   };
 }

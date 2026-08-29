@@ -102,6 +102,16 @@ const stubEnvelope: WebhookEnvelope = {
   data: stubTx,
 };
 
+function successfulReceiptResponse(): Response {
+  return new Response(JSON.stringify({
+    ok: true,
+    receipt_version: 1,
+    delivery_id: stubEnvelope.delivery_id,
+    outcome: 'already_paid',
+    order_id: 'order-1',
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+}
+
 function makeMsg(overrides: Partial<WebhookQueueMessage & { attempts: number }> = {}): Message<WebhookQueueMessage> {
   const body: WebhookQueueMessage = {
     message_version: 2,
@@ -200,7 +210,7 @@ describe('2xx happy path', () => {
   it('acks message, no retry, inserts webhook_log row with http_status=200', async () => {
     const secret = 'test-secret-happy';
     const { env, sqlite } = await makeEnv(secret);
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('ok', { status: 200 }));
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(successfulReceiptResponse());
 
     const msg = makeMsg({ attempts: 1 });
     const batch = makeBatch([msg]);
@@ -214,8 +224,32 @@ describe('2xx happy path', () => {
     expect(row!.http_status).toBe(200);
     expect(row!.attempt).toBe(1);
     expect(fetchSpy.mock.calls[0]?.[1]).toMatchObject({ redirect: 'manual' });
+    expect(sqlite.prepare(`SELECT business_outcome, business_outcome_version, receipt_json FROM webhook_delivery_jobs WHERE id = 1`).get())
+      .toEqual({
+        business_outcome: 'already_paid',
+        business_outcome_version: 1,
+        receipt_json: JSON.stringify({ receipt_version: 1, delivery_id: stubEnvelope.delivery_id, outcome: 'already_paid', order_id: 'order-1' }),
+      });
 
     fetchSpy.mockRestore();
+  });
+
+  it('retries a 2xx whose receipt delivery id does not match the signed envelope', async () => {
+    const { env, sqlite } = await makeEnv('test-secret-invalid-receipt');
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      ok: true,
+      receipt_version: 1,
+      delivery_id: 'different-delivery',
+      outcome: 'already_paid',
+    }), { status: 200 }));
+
+    const msg = makeMsg({ attempts: 1 });
+    await handleQueueBatch(makeBatch([msg]), env);
+
+    expect(msg.retry).toHaveBeenCalledWith({ delaySeconds: 30 });
+    expect(msg.ack).not.toHaveBeenCalled();
+    expect(sqlite.prepare(`SELECT status, last_error, receipt_json FROM webhook_delivery_jobs WHERE id = 1`).get())
+      .toEqual({ status: 'queued', last_error: 'receipt_invalid', receipt_json: null });
   });
 });
 
@@ -352,7 +386,7 @@ describe('HMAC canonicalization on wire', () => {
     let capturedBody: Uint8Array | undefined;
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       capturedBody = init?.body instanceof Uint8Array ? init.body : new Uint8Array(init?.body as ArrayBuffer);
-      return new Response('ok', { status: 200 });
+      return successfulReceiptResponse();
     });
 
     const msg = makeMsg({ attempts: 1 });
@@ -377,7 +411,7 @@ describe('prev-secret fallback on 401', () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
       callCount++;
       if (callCount === 1) return new Response('unauthorized', { status: 401 });
-      return new Response('ok', { status: 200 });
+      return successfulReceiptResponse();
     });
 
     const msg = makeMsg({ attempts: 1 });
@@ -408,7 +442,7 @@ describe('prev-secret fallback on 401', () => {
       callCount++;
       if (callCount === 1) return new Response('unauthorized', { status: 401 });
       secondBody = init?.body instanceof Uint8Array ? init.body : new Uint8Array(init?.body as ArrayBuffer);
-      return new Response('ok', { status: 200 });
+      return successfulReceiptResponse();
     });
 
     const msg = makeMsg({ attempts: 1 });

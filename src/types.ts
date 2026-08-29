@@ -61,6 +61,15 @@ export interface WebhookEnvelope {
   data: Transaction;
 }
 
+/** Bounded acknowledgement returned by a consumer after its durable inbox and
+ * business handling are complete. A bare HTTP 2xx is not delivery success. */
+export interface WebhookDeliveryReceipt {
+  receipt_version: 1;
+  delivery_id: string;
+  outcome: string;
+  order_id?: string;
+}
+
 export type InsertResult =
   | { status: 'inserted'; transaction: Transaction }
   | {

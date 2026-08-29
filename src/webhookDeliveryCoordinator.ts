@@ -125,8 +125,16 @@ export function createWebhookDeliveryCoordinator(
     const cls = classifyHttpStatus(httpStatus);
 
     if (cls === 'delivered') {
+      if (!result.receipt) {
+        const delaySeconds = backoffSeconds(attempts);
+        const errorMessage = result.receiptError ?? 'receipt_missing';
+        await insertWebhookLogEntry(db, { ...logBase, http_status: httpStatus, error_message: errorMessage });
+        const outcome = await recordDeliveryOutcome(db, { deliveryJobId: m.delivery_job_id, ...fence, kind: 'queue_retry', httpStatus, error: errorMessage, delaySeconds });
+        log('webhook_receipt_invalid', { delivery_id: m.delivery_id, consumer_app_id: m.consumer_app_id, reason: errorMessage, attempts, delay_seconds: delaySeconds });
+        return retryUnlessSettled(outcome, delaySeconds);
+      }
       await insertWebhookLogEntry(db, { ...logBase, http_status: httpStatus, error_message: usedPrevSecret ? 'retry_with_prev' : null });
-      await recordDeliveryOutcome(db, { deliveryJobId: m.delivery_job_id, ...fence, kind: 'delivered', httpStatus });
+      await recordDeliveryOutcome(db, { deliveryJobId: m.delivery_job_id, ...fence, kind: 'delivered', httpStatus, receipt: result.receipt });
       log(usedPrevSecret ? 'webhook_delivered_with_prev_secret' : 'webhook_delivered', { delivery_id: m.delivery_id, consumer_app_id: m.consumer_app_id, http_status: httpStatus });
       return { action: 'ack' };
     }
