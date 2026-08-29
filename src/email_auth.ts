@@ -67,11 +67,12 @@ export function authenticateEmailIdentity(
   const trusted = evidence.trustedAuthservId.trim().toLowerCase();
   const auth = evidence.authenticationResults?.trim() ?? '';
   if (!trusted || !auth) throw new EmailAuthenticationError('trusted_authentication_missing');
-  const escaped = trusted.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   // Headers.get() combines repeated Authentication-Results fields with commas.
   // Reject every combined/ambiguous value instead of allowing an appended
   // untrusted result to contribute a passing method or identity property.
-  if (auth.includes(',') || !new RegExp(`^${escaped}\\s*;`, 'i').test(auth)) {
+  const separator = auth.indexOf(';');
+  const observedAuthservId = separator >= 0 ? auth.slice(0, separator).trim().toLowerCase() : '';
+  if (auth.includes(',') || observedAuthservId !== trusted) {
     throw new EmailAuthenticationError('trusted_authentication_ambiguous');
   }
   const fields = auth.split(';').slice(1).map(value => value.trim()).filter(Boolean);
