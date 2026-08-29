@@ -1,0 +1,55 @@
+name: Promote
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact package version to promote from protected main
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: banksync-release-promotion
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    if: github.repository == 'festappnet/banksync'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: 11.24.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22.14.0
+          package-manager-cache: false
+      - name: Verify protected source and requested version
+        shell: bash
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          test "$GITHUB_REF" = "refs/heads/main"
+          git fetch --no-tags origin main
+          test "$GITHUB_SHA" = "$(git rev-parse origin/main)"
+          test "$REQUESTED_VERSION" = "$(node -p "require('./package.json').version")"
+          [[ "$REQUESTED_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test -z "$(git ls-remote --tags origin "refs/tags/v$REQUESTED_VERSION")"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+      - run: pnpm audit --prod --audit-level low
+      - name: Create the immutable release tag
+        shell: bash
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git tag -a "v$REQUESTED_VERSION" -m "Release v$REQUESTED_VERSION" "$GITHUB_SHA"
+          git push origin "refs/tags/v$REQUESTED_VERSION"
