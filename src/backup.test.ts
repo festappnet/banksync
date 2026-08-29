@@ -204,9 +204,8 @@ describe('backup', () => {
         }
       }
 
-      // Should not contain any INSERT statements (except schema_meta)
-      const insertMatches = sql.match(/INSERT INTO/g) || [];
-      expect(insertMatches.length).toBe(1); // Only schema_meta
+      expect(sql).not.toContain('INSERT INTO');
+      expect(sql).toContain('INSERT OR REPLACE INTO schema_meta');
     });
 
     it('DB with bank_accounts contains INSERT INTO bank_accounts', async () => {
@@ -232,6 +231,20 @@ describe('backup', () => {
       expect(rowCounts.bank_accounts).toBe(2);
       expect(rowCounts.webhook_consumers).toBe(1);
       expect(rowCounts.transactions).toBe(0);
+    });
+
+    it('restores into a freshly migrated schema without schema_meta conflicts', async () => {
+      const { db, sqlite } = makeTestDb();
+      sqlite.prepare(`INSERT INTO bank_accounts (account_number, pairing_code) VALUES (?, ?)`).run('1234/2010', 'code0001');
+      sqlite.prepare(`INSERT INTO schema_meta (key, value) VALUES (?, ?)`).run('backup_fixture', 'present');
+      const { sql } = await buildSqlDump(db);
+
+      const restored = new Database(':memory:');
+      applyMigrations(restored);
+      expect(() => restored.exec(sql)).not.toThrow();
+      expect(restored.prepare(`SELECT count(*) AS count FROM bank_accounts`).get()).toEqual({ count: 1 });
+      expect(restored.prepare(`SELECT value FROM schema_meta WHERE key = 'version'`).get()).toEqual({ value: '10' });
+      expect(restored.prepare(`SELECT value FROM schema_meta WHERE key = 'backup_fixture'`).get()).toEqual({ value: 'present' });
     });
 
     it('NULL columns emit literal NULL', async () => {
