@@ -1,7 +1,7 @@
 # Secure BankSync public release
 
 Date: 2026-08-29  
-Status: Production security cutover complete except trusted-email canary and npm publication
+Status: Production security cutover complete except genuine-bank email proof and npm publication
 Verification: release
 
 ## Outcome
@@ -122,7 +122,7 @@ the attacker's consumer to another tenant's account.
   It contains only `0001_schema.sql` and `0010_security_hardening.sql` under
   `migrations/`, contains both module-system entry points, and has no weak
   verifier export.
-- Production Worker version `5843d7b5-009b-4aa2-994c-c51b8fcfb541` runs the
+- Production Worker version `0ede8e5c-b77f-4de1-a84c-8da21666fe1e` runs the
   pinned runtime commit. D1 is at schema version 10; credential-shaped and all
   legacy idempotency rows are absent. Anonymous `/status` and `/health/deep`
   return 401 while `/health` returns only `{"ok":true}`. A foreign-account
@@ -148,9 +148,12 @@ the attacker's consumer to another tenant's account.
   24-hour same-name cooldown; publication cannot resume before approximately
   2026-08-30 15:48:23 CEST. No stable npm version or `v0.1.2` tag exists yet.
 - Production has `BACKUP_ENCRYPTION_KEY_V1`; the same restore key is held
-  independently outside Cloudflare. `EMAIL_AUTHSERV_ID` intentionally remains
-  unset until accepted/rejected production evidence establishes the trusted
-  Cloudflare authserv-id.
+  independently outside Cloudflare. A paid SES bootstrap canary established
+  `mx.cloudflare.net` as the single non-ambiguous Cloudflare authserv-id; it is
+  configured, deep health is green, and a second controlled message was
+  rejected with `email_identity_mismatch` without creating a transaction. The
+  remaining accepted proof must come from a genuine signed bank notification,
+  not a simulated non-bank sender.
 - The only remaining R2 object is the encrypted, independently restored
   `banksync-20260829.sql.enc` (SHA-256
   `ed2cfa38ac0ac0ffeb8af4df32879d00bf5ffef083c63b49bd46d8e98b60005e`).
