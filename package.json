@@ -21,11 +21,13 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./cloudflare": {
       "types": "./dist/cloudflare.d.ts",
-      "import": "./dist/cloudflare.js"
+      "import": "./dist/cloudflare.js",
+      "default": "./dist/cloudflare.js"
     }
   },
   "scripts": {
