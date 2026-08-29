@@ -1046,7 +1046,8 @@ async function dispatch(
       });
     } catch (err) {
       if (err instanceof FioRateLimited || err instanceof FioTransientFailure) {
-        return jsonResponse({ error: 'fio_api_transient_failure', detail: String(err) }, 503);
+        logError('fio_api_manual_sync_failed', err, { bank_account_id: id });
+        return jsonResponse({ error: 'fio_api_transient_failure' }, 503);
       }
       throw err;
     }
