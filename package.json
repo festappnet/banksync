@@ -22,22 +22,25 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
+      "require": "./dist/index.cjs",
       "default": "./dist/index.js"
     },
     "./cloudflare": {
       "types": "./dist/cloudflare.d.ts",
       "import": "./dist/cloudflare.js",
+      "require": "./dist/cloudflare.cjs",
       "default": "./dist/cloudflare.js"
     }
   },
   "scripts": {
-    "build": "tsup src/index.ts src/cloudflare.ts --format esm --dts --clean --splitting",
+    "build": "tsup src/index.ts src/cloudflare.ts --format esm,cjs --dts --clean --splitting",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "test": "vitest run",
     "security:secrets": "node scripts/check-secrets.mjs",
     "typecheck": "tsc --noEmit",
-    "check": "pnpm typecheck && pnpm test && pnpm build",
+    "check": "pnpm typecheck && pnpm test && pnpm build && pnpm check:package-exports",
+    "check:package-exports": "node scripts/check-package-exports.mjs",
     "prepack": "pnpm build"
   },
   "dependencies": {
