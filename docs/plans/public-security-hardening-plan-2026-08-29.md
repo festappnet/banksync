@@ -1,7 +1,7 @@
 # Secure BankSync public release
 
 Date: 2026-08-29  
-Status: Source/repository hardening complete; publication and production cutover pending
+Status: Production security cutover complete except trusted-email canary and npm publication
 Verification: release
 
 ## Outcome
@@ -111,28 +111,34 @@ the attacker's consumer to another tenant's account.
 
 ### Execution evidence (2026-08-29)
 
-- Local source hardening passes 29 Vitest files / 544 tests, typecheck, dual
+- Local source hardening passes 29 Vitest files / 547 tests, typecheck, dual
   ESM/CommonJS build and load smoke,
   production dependency audit, Wrangler Worker dry-run, and both fresh and
   recorded-0001–0009-to-0010 disposable Wrangler D1 migration flows.
 - Two independent `npm pack --ignore-scripts` runs produced byte-identical
   `festapp-banksync-0.1.2.tgz` with SHA-256
-  `474452afc374f9b6e647ac705572997fd352901ff6bc0f9ea6e485147495f941`.
+  `078dcd186140a884c7739cccc306e334b8b490e1079b7ff2471e274b4f7d824b`
+  from runtime commit `14d22b74d5a5eecc335db3a924324b3ff04cb06e`.
   It contains only `0001_schema.sql` and `0010_security_hardening.sql` under
   `migrations/`, contains both module-system entry points, and has no weak
   verifier export.
-- Read-only production checks still show the old state: deployment version
-  `c4207046-6d0b-4037-a1a7-c142db7619ce` at 100% (secret-only revision of the
-  old code), D1 schema version 9,
-  anonymous `/status` and `/health/deep` returning 200, and two active
-  cross-owner subscriptions. Both are approved Mendelio platform sharing
-  (`tutoring` account owner to the `dating` and `voice` consumers). No
-  credential-shaped idempotency row was found.
+- Production Worker version `5843d7b5-009b-4aa2-994c-c51b8fcfb541` runs the
+  pinned runtime commit. D1 is at schema version 10; credential-shaped and all
+  legacy idempotency rows are absent. Anonymous `/status` and `/health/deep`
+  return 401 while `/health` returns only `{"ok":true}`. A foreign-account
+  subscription attempt returned 403 and left D1 unchanged.
+- A forced replay of completed delivery `01KY998ZM7TK15RE3GHE7H9K85` returned
+  the existing consumer result without repeating settlement. BankSync accepted
+  only the matching version-1 receipt and atomically stored
+  `business_outcome=ignored`, its exact delivery ID, and HTTP 200. The expired
+  dating workload credential found during this proof was replaced through the
+  bounded two-phase rotation; the old credential is revoked.
 - The production callback allowlist is resolved to the three exact active
   hosts: `mendelio.net`, `muzazena.festapp.net`, and `voice.mendelio.net`.
-  Four `httpbin.org` E2E consumers and the `maturita.festapp.net` legacy
-  consumer have zero active subscriptions and remain cleanup candidates, not
-  allowlist entries.
+  Four empty `httpbin.org` E2E consumers were deleted. The legacy
+  `michael-airbank` consumer was retained because it owns an active account and
+  transaction history; it has no active subscription and its callback host is
+  not allowlisted.
 - GitHub main and `v*` tags are protected by active rulesets; required build,
   dependency review, secrets, and CodeQL checks are enforced. Secret scanning,
   push protection, Dependabot security updates, and private vulnerability
@@ -145,6 +151,11 @@ the attacker's consumer to another tenant's account.
   independently outside Cloudflare. `EMAIL_AUTHSERV_ID` intentionally remains
   unset until accepted/rejected production evidence establishes the trusted
   Cloudflare authserv-id.
+- The only remaining R2 object is the encrypted, independently restored
+  `banksync-20260829.sql.enc` (SHA-256
+  `ed2cfa38ac0ac0ffeb8af4df32879d00bf5ffef083c63b49bd46d8e98b60005e`).
+  Its restored schema version and all 13 backed-up table counts matched; eight
+  historical plaintext backup objects were then deleted.
 
 ## Target architecture and invariants
 
@@ -683,22 +694,22 @@ verification exports, plaintext backup output, or old R2 objects.
 
 ## Definition of complete
 
-- [ ] Wave 0 containment is running in production.
-- [ ] Every tenant path authorizes from stored ownership and all foreign-ID
+- [x] Wave 0 containment is running in production.
+- [x] Every tenant path authorizes from stored ownership and all foreign-ID
       negative tests leave D1 unchanged.
 - [ ] Email identity uses only Cloudflare-owned evidence and spoof fixtures fail.
-- [ ] Public HTTP exposes only coarse health and cannot trigger active probes.
-- [ ] Credential responses never enter idempotency or backup persistence.
-- [ ] Backup objects are application-layer encrypted and restore is proven.
-- [ ] Callback egress is allowlisted and redirect-free.
-- [ ] The canonical verifier is used by Mendelio with durable replay handling.
-- [ ] Fresh and upgraded D1 converge at version 10; legacy DLQ and migration
+- [x] Public HTTP exposes only coarse health and cannot trigger active probes.
+- [x] Credential responses never enter idempotency or backup persistence.
+- [x] Backup objects are application-layer encrypted and restore is proven.
+- [x] Callback egress is allowlisted and redirect-free.
+- [x] The canonical verifier is used by Mendelio with durable replay handling.
+- [x] Fresh and upgraded D1 converge at version 10; legacy DLQ and migration
       artifacts are absent from the package.
-- [ ] No BankSync migration was moved into or confused with Mendelio billing.
-- [ ] GitHub main/tags, CI actions, scanning, and release workflow are hardened.
+- [x] No BankSync migration was moved into or confused with Mendelio billing.
+- [x] GitHub main/tags, CI actions, scanning, and release workflow are hardened.
 - [ ] npm authentication/trusted publishing works and published bytes match the
       tested GitHub artifact and checksum.
-- [ ] Mendelio lockfile and production Worker run that exact version.
+- [x] Mendelio lockfile and production Worker run that exact version.
 - [ ] Full release verification and production smoke pass after the final deploy.
 
 ## Residual risks
