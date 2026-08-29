@@ -1,6 +1,10 @@
 packages:
   - .
 
+overrides:
+  'esbuild@>=0.27.3 <0.28.1': 0.28.1
+  'undici@>=7.0.0 <7.29.0': 7.29.0
+
 allowBuilds:
   '@cloudflare/unenv-preset': false
   '@vitest/mocker': false
