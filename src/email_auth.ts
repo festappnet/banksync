@@ -19,6 +19,29 @@ export class EmailAuthenticationError extends Error {
   }
 }
 
+export interface AuthenticationHeaderInspection {
+  observedAuthservId: string | null;
+  ambiguous: boolean;
+}
+
+/**
+ * Return only the bounded, DNS-shaped authserv-id needed for the production
+ * trust bootstrap. Never expose the rest of Authentication-Results to logs.
+ */
+export function inspectAuthenticationResults(value: string | null): AuthenticationHeaderInspection {
+  const auth = value?.trim() ?? '';
+  const separator = auth.indexOf(';');
+  const candidate = separator >= 0 ? auth.slice(0, separator).trim().toLowerCase() : '';
+  const ambiguous = auth.includes(',');
+  const observedAuthservId = !ambiguous
+    && candidate.length > 0
+    && candidate.length <= 253
+    && /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$/.test(candidate)
+    ? candidate
+    : null;
+  return { observedAuthservId, ambiguous };
+}
+
 function normalizeAddress(value: string | undefined): string | null {
   if (!value) return null;
   const match = /<([^<>]+)>/.exec(value);
@@ -70,9 +93,8 @@ export function authenticateEmailIdentity(
   // Headers.get() combines repeated Authentication-Results fields with commas.
   // Reject every combined/ambiguous value instead of allowing an appended
   // untrusted result to contribute a passing method or identity property.
-  const separator = auth.indexOf(';');
-  const observedAuthservId = separator >= 0 ? auth.slice(0, separator).trim().toLowerCase() : '';
-  if (auth.includes(',') || observedAuthservId !== trusted) {
+  const inspection = inspectAuthenticationResults(auth);
+  if (inspection.ambiguous || inspection.observedAuthservId !== trusted) {
     throw new EmailAuthenticationError('trusted_authentication_ambiguous');
   }
   const fields = auth.split(';').slice(1).map(value => value.trim()).filter(Boolean);

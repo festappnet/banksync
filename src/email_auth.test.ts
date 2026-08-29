@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { authenticateEmailIdentity, EmailAuthenticationError } from './email_auth';
+import { authenticateEmailIdentity, EmailAuthenticationError, inspectAuthenticationResults } from './email_auth';
 
 const base = {
   mailFrom: 'noreply@fio.cz',
@@ -10,6 +10,21 @@ const base = {
 const mime = { fromHeader: 'noreply@fio.cz', toHeader: 'aabbccdd11@banksync.example.com' };
 
 describe('authenticateEmailIdentity', () => {
+  it('extracts only one bounded DNS-shaped authserv-id for bootstrap logging', () => {
+    expect(inspectAuthenticationResults('MX.Cloudflare.Net; dkim=pass header.d=fio.cz')).toEqual({
+      observedAuthservId: 'mx.cloudflare.net',
+      ambiguous: false,
+    });
+    expect(inspectAuthenticationResults('mx.cloudflare.net; dkim=pass, attacker.example; dkim=pass')).toEqual({
+      observedAuthservId: null,
+      ambiguous: true,
+    });
+    expect(inspectAuthenticationResults('attacker value; dkim=pass')).toEqual({
+      observedAuthservId: null,
+      ambiguous: false,
+    });
+  });
+
   it('accepts one aligned result from the configured authserv-id', () => {
     expect(authenticateEmailIdentity(base, mime)).toEqual({
       sender: 'noreply@fio.cz',
