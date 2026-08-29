@@ -6,7 +6,7 @@ Verification: release
 
 ## Outcome
 
-BankSync can be published and promoted as `festapp-banksync` only after its
+BankSync can be published and promoted as `mendelio-banksync` only after its
 production Worker and reusable package enforce tenant isolation, authenticate
 bank email using Cloudflare-owned envelope/authentication evidence, avoid
 persisting recoverable credentials, constrain outbound webhooks, expose only a
@@ -115,7 +115,7 @@ the attacker's consumer to another tenant's account.
   production dependency audit, Wrangler Worker dry-run, and both fresh and
   recorded-0001–0009-to-0010 disposable Wrangler D1 migration flows.
 - Two independent `npm pack --ignore-scripts` runs produced byte-identical
-  `festapp-banksync-0.1.2.tgz` with SHA-256
+  `mendelio-banksync-0.1.2.tgz` with SHA-256
   `0531be239d33ee543bfaa34b9b97a1da093c1106beed64dccb305af3fbaec57d`.
   It contains only `0001_schema.sql` and `0010_security_hardening.sql` under
   `migrations/` and has no weak verifier export.
@@ -129,7 +129,7 @@ the attacker's consumer to another tenant's account.
   apparent test host.
 - GitHub still has no ruleset or main protection, secret scanning/push
   protection and Dependabot security updates are disabled, and npm returns 404
-  for `festapp-banksync`. Those external controls and publication remain
+  for `mendelio-banksync`. Those external controls and publication remain
   intentionally unapplied without separate authority.
 
 ## Target architecture and invariants
@@ -144,7 +144,7 @@ the attacker's consumer to another tenant's account.
 - Cross-consumer sharing is an administrator-only operation. A tenant may only
   create or remove a subscription whose account owner and consumer both equal
   its own `app_id`; owner auto-subscription remains the normal path.
-- `festapp-banksync` owns the canonical high-level webhook verification
+- `mendelio-banksync` owns the canonical high-level webhook verification
   contract: raw body HMAC, timestamp syntax and tolerance, delivery-ID header
   equality with parsed body, event/version validation, and structured errors.
 - Each consumer owns business settlement and its idempotent inbox. BankSync

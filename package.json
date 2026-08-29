@@ -1,5 +1,5 @@
 {
-  "name": "festapp-banksync",
+  "name": "mendelio-banksync",
   "version": "0.1.2",
   "description": "Bank transaction ingestion for Cloudflare Workers: Czech bank email and Fio API parsing, durable deduplication, and signed webhook delivery.",
   "type": "module",
