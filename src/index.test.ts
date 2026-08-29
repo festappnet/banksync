@@ -903,6 +903,25 @@ describe('admin POST /bank-accounts', () => {
     vi.unstubAllGlobals();
   });
 
+  it('does not expose Fio upstream error detail from manual sync', async () => {
+    const { db, sqlite } = makeTestDb();
+    const env = makeEnv(db);
+    sqlite.prepare(
+      `INSERT INTO webhook_consumers (app_id, callback_url, secret_cipher, secret_hash, secret_prefix) VALUES ('festapp', 'https://x', 'c', 'h', 'p')`
+    ).run();
+    const createRes = await adminReq('POST', '/bank-accounts', env, {
+      account_number: '123456/2010',
+      owner_app_id: 'festapp',
+      fio_api_token: 'fio-token-secret-1',
+    });
+    const created = await createRes.json() as { id: number };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('upstream-secret-stack-detail', { status: 429 })));
+
+    const syncRes = await adminReq('POST', `/bank-accounts/${created.id}/fio-sync`, env);
+    expect(syncRes.status).toBe(503);
+    expect(await syncRes.json()).toEqual({ error: 'fio_api_transient_failure' });
+  });
+
   it('initial Fio sync sets pointer only, then throttles the next request for 30 seconds', async () => {
     const { db, sqlite } = makeTestDb();
     const env = { ...makeEnv(db), FIO_MIN_INTERVAL_S: '30' };

@@ -103,6 +103,8 @@ This is a completely unrelated email with no bank fields at all.
 Please disregard.
 `;
 
+const ADVERSARIAL_WHITESPACE = '\t'.repeat(100_000);
+
 // Real AirBank notification received 2026-05-09 (minimal — no VS/KS/SS/Zpráva)
 const AIRBANK_REAL_2026_05_09 = `
 Dobrý den,
@@ -167,6 +169,23 @@ describe('parseEmail — Fio CZK incoming', () => {
     expect(result.performed_by).toBeNull();
     expect(result.comment).toBeNull();
     expect(result.command_id).toBeNull();
+  });
+});
+
+describe('parseEmail — bounded adversarial fields', () => {
+  it('rejects oversized amount whitespace without regex backtracking', () => {
+    expect(parseEmail(`Částka:${ADVERSARIAL_WHITESPACE}!`, 'fio_email')).toBeNull();
+  });
+
+  it('rejects an unbounded Air Bank amount-label gap', () => {
+    expect(parseEmail(`Částka${'Amount'.repeat(20_000)}: 1,00 CZK`, 'airbank_email')).toBeNull();
+  });
+
+  it('does not scan an oversized Air Bank counterparty gap', () => {
+    expect(parseEmail(`Částka: 1,00 CZK\nz účtu ${' '.repeat(100_000)}!`, 'airbank_email')).toMatchObject({
+      counter_account: null,
+      bank_code: null,
+    });
   });
 });
 

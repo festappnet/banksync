@@ -59,6 +59,106 @@ function parseAmount(raw: string): number {
   return parseFloat(s);
 }
 
+const MAX_AMOUNT_FIELD_CHARS = 64;
+
+function isAsciiDigit(char: string): boolean {
+  const code = char.charCodeAt(0);
+  return code >= 48 && code <= 57;
+}
+
+function isAsciiLetter(char: string): boolean {
+  const code = char.charCodeAt(0);
+  return (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+}
+
+function isAmountChar(char: string): boolean {
+  return isAsciiDigit(char)
+    || char === ' '
+    || char === '\t'
+    || char === '\u00a0'
+    || char === ','
+    || char === '.'
+    || char === '-';
+}
+
+function findLabeledLineValue(text: string, labels: readonly string[]): string | null {
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trimStart();
+    const lower = trimmed.toLowerCase();
+    for (const label of labels) {
+      let searchFrom = 0;
+      while (searchFrom < lower.length) {
+        const labelAt = lower.indexOf(label, searchFrom);
+        if (labelAt < 0) break;
+        const before = labelAt > 0 ? (lower[labelAt - 1] ?? '') : '';
+        let cursor = labelAt + label.length;
+        while (cursor < trimmed.length && (trimmed[cursor] === ' ' || trimmed[cursor] === '\t')) cursor += 1;
+        if (!isAsciiLetter(before) && trimmed[cursor] === ':') return trimmed.slice(cursor + 1).trimStart();
+        searchFrom = labelAt + label.length;
+      }
+    }
+  }
+  return null;
+}
+
+function parseLabeledAmount(
+  text: string,
+  labels: readonly string[],
+): { rawAmount: string; currency: string } | null {
+  const value = findLabeledLineValue(text, labels);
+  if (!value) return null;
+
+  let cursor = 0;
+  while (cursor < value.length && cursor <= MAX_AMOUNT_FIELD_CHARS && isAmountChar(value[cursor] ?? '')) cursor += 1;
+  if (cursor === 0 || cursor > MAX_AMOUNT_FIELD_CHARS) return null;
+
+  const rawAmount = value.slice(0, cursor).trim();
+  if (![...rawAmount].some(isAsciiDigit)) return null;
+
+  const currencyStart = cursor;
+  while (cursor < value.length && cursor - currencyStart < 3 && isAsciiLetter(value[cursor] ?? '')) cursor += 1;
+  const currency = value.slice(currencyStart, cursor);
+  if (currency.length < 2 || currency.length > 3 || isAsciiLetter(value[cursor] ?? '')) return null;
+  return { rawAmount, currency };
+}
+
+function parseAccountPrefix(value: string): string | null {
+  let cursor = 0;
+  while (cursor < value.length && cursor < 20 && isAsciiDigit(value[cursor] ?? '')) cursor += 1;
+  if (cursor === 0 || value[cursor] !== '/') return null;
+  cursor += 1;
+  for (let digits = 0; digits < 4; digits += 1, cursor += 1) {
+    if (!isAsciiDigit(value[cursor] ?? '')) return null;
+  }
+  if (isAsciiDigit(value[cursor] ?? '')) return null;
+  return value.slice(0, cursor);
+}
+
+function parseAirbankCounterparty(text: string): { account: string; senderName: string | null } | null {
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    const lower = trimmed.toLowerCase();
+    const marker = 'z účtu';
+    const markerAt = lower.indexOf(marker);
+    if (markerAt < 0) continue;
+
+    const remainder = trimmed.slice(markerAt + marker.length).trimStart();
+    const numberMarker = ' číslo ';
+    const numberAt = remainder.toLowerCase().lastIndexOf(numberMarker);
+    const accountText = numberAt >= 0
+      ? remainder.slice(numberAt + numberMarker.length).trimStart()
+      : remainder;
+    const account = parseAccountPrefix(accountText);
+    if (!account) continue;
+
+    const senderName = numberAt >= 0
+      ? (remainder.slice(0, numberAt).trim().replace(/\s+/g, ' ') || null)
+      : null;
+    return { account, senderName };
+  }
+  return null;
+}
+
 // noUncheckedIndexedAccess makes regex capture groups string|undefined.
 // Use this to safely read a required capture group (regex is written to always capture).
 function g(m: RegExpMatchArray, i: number, fallback = ''): string {
@@ -137,16 +237,14 @@ export function parseEmail(
   provider: EmailProvider,
 ): ParsedEmailTransaction | null {
   if (provider === 'fio_email') {
-    const amountMatch = text.match(
-      /(?:Částka|Castka|Amount):\s*([\d\s,.-]+)\s*([A-Za-z]{2,3})/i,
-    );
-    if (!amountMatch) return null;
+    const amountField = parseLabeledAmount(text, ['částka', 'castka', 'amount']);
+    if (!amountField) return null;
 
-    const rawCurrencyStr = amountMatch[2] ?? '';
+    const rawCurrencyStr = amountField.currency;
     // normalizeCurrency throws on unknown — caller catches and logs unknown_currency
     const currency = normalizeCurrency(rawCurrencyStr);
 
-    const amount = parseAmount(amountMatch[1] ?? '');
+    const amount = parseAmount(amountField.rawAmount);
     if (isNaN(amount)) return null;
     // Incoming-only: negative amount → return null (caller logs outgoing_filtered)
     if (amount < 0) return null;
@@ -204,27 +302,22 @@ export function parseEmail(
   }
 
   if (provider === 'airbank_email') {
-    const amountMatch = text.match(
-      /(?:Částka|Castka|Amount)[\s\S]*?:\s*([\d\s,.-]+)\s*([A-Za-z]{2,3})/i,
-    );
-    if (!amountMatch) return null;
+    const amountField = parseLabeledAmount(text, ['částka', 'castka', 'amount']);
+    if (!amountField) return null;
 
-    const rawCurrencyStr = amountMatch[2] ?? '';
+    const rawCurrencyStr = amountField.currency;
     const currency = normalizeCurrency(rawCurrencyStr);
 
-    const amountStr = (amountMatch[1] ?? '').replace(/\s/g, '');
+    const amountStr = amountField.rawAmount.replace(/\s/g, '');
     if (!amountStr) return null;
-    const amount = parseAmount(amountMatch[1] ?? '');
+    const amount = parseAmount(amountField.rawAmount);
     if (isNaN(amount)) return null;
     if (amount < 0) return null;
 
     const amount_cents = toCents(amount, currency);
 
     // AirBank: "z účtu Name Name číslo 123/2010" or "z účtu 123/2010"
-    const accountLineMatch = text.match(
-      /(?:z účtu|Příchozí úhrada z účtu)\s+([\s\S]*?)\s+číslo\s*([0-9\/]+)/i,
-    );
-    const simpleAccountMatch = text.match(/z účtu\s*([0-9\/]+)/i);
+    const counterparty = parseAirbankCounterparty(text);
 
     const vsMatch = text.match(/(?:Variabilní symbol|\bVS\b)\s*:\s*([0-9]+)/i);
     const ksMatch = text.match(/(?:Konstantní symbol|\bKS\b)\s*:\s*([0-9]+)/i);
@@ -239,14 +332,9 @@ export function parseEmail(
     let bank_code: string | null = null;
     let sender_name: string | null = null;
 
-    if (accountLineMatch) {
-      sender_name = (accountLineMatch[1] ?? '').trim().replace(/\s+/g, ' ') || null;
-      const rawAcc = accountLineMatch[2] ?? '';
-      const parts = rawAcc.split('/');
-      counter_account = parts[0] ?? null;
-      bank_code = parts.length > 1 ? (parts[1] ?? null) : null;
-    } else if (simpleAccountMatch) {
-      const rawAcc = (simpleAccountMatch[1] ?? '').replace(/\s/g, '');
+    if (counterparty) {
+      sender_name = counterparty.senderName;
+      const rawAcc = counterparty.account;
       const parts = rawAcc.split('/');
       counter_account = parts[0] ?? null;
       bank_code = parts.length > 1 ? (parts[1] ?? null) : null;
