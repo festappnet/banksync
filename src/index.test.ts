@@ -1653,6 +1653,28 @@ describe('tenant scope — bank account isolation', () => {
     expect(shared.status).toBe(201);
   });
 
+  it('returns a stable subscription-cap error without internal detail', async () => {
+    const { db, sqlite } = makeTestDb();
+    const env = makeEnv(db);
+    sqlite.prepare(`INSERT INTO webhook_consumers (app_id, callback_url, secret_cipher, secret_hash, secret_prefix) VALUES ('owner', 'https://owner.example/hook', 'c', 'h', 'p')`).run();
+    const account = sqlite.prepare(`INSERT INTO bank_accounts (account_number, pairing_code, owner_app_id) VALUES ('1/2010', '0000000001', 'owner')`).run();
+    const accountId = Number(account.lastInsertRowid);
+    const insertConsumer = sqlite.prepare(`INSERT INTO webhook_consumers (app_id, callback_url, secret_cipher, secret_hash, secret_prefix) VALUES (?, ?, 'c', 'h', 'p')`);
+    const insertSubscription = sqlite.prepare(`INSERT INTO webhook_subscriptions (bank_account_id, consumer_app_id) VALUES (?, ?)`);
+    for (let index = 1; index <= 21; index += 1) {
+      const appId = `consumer-${index}`;
+      insertConsumer.run(appId, `https://consumer-${index}.example/hook`);
+      if (index <= 20) insertSubscription.run(accountId, appId);
+    }
+
+    const response = await adminReq('POST', '/subscriptions', env, {
+      app_id: 'consumer-21',
+      bank_account_id: accountId,
+    });
+    expect(response.status).toBe(422);
+    expect(await response.json()).toEqual({ error: 'subscription_cap_reached' });
+  });
+
   it('applies tenant ownership in SQL before transaction/log limits', async () => {
     const { db, sqlite } = makeTestDb();
     const env = makeEnv(db);
