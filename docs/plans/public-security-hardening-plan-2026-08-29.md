@@ -140,7 +140,7 @@ the attacker's consumer to another tenant's account.
 - `@festapp/banksync` is the canonical npm identity. A bootstrap package was
   fully unpublished during namespace setup, so npm enforces its documented
   24-hour same-name cooldown; publication cannot resume before approximately
-  2026-08-30 15:43 CEST. No stable npm version or `v0.1.2` tag exists yet.
+  2026-08-30 15:48:23 CEST. No stable npm version or `v0.1.2` tag exists yet.
 - Production has `BACKUP_ENCRYPTION_KEY_V1`; the same restore key is held
   independently outside Cloudflare. `EMAIL_AUTHSERV_ID` intentionally remains
   unset until accepted/rejected production evidence establishes the trusted
