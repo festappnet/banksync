@@ -16,8 +16,13 @@ The included Worker supports:
 ## Install as a package
 
 ```bash
-pnpm add @festapp/banksync
+pnpm add @festapp/banksync@https://github.com/festappnet/banksync/releases/download/v0.1.0/festapp-banksync-0.1.0.tgz
 ```
+
+The release tarball is the canonical `0.1.0` artifact and is integrity-pinned
+by pnpm lockfiles. Registry installation with `pnpm add @festapp/banksync`
+will become available after the Festapp npm account is re-authenticated; the
+package name and runtime interface will not change.
 
 The root export contains runtime-neutral parsing and webhook helpers:
 
