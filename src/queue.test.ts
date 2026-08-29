@@ -59,7 +59,7 @@ function wrapAsD1(sqlite: Database.Database): D1Database {
 
 function makeTestDb(): { db: D1Database; sqlite: Database.Database } {
   const sqlite = new Database(':memory:');
-  for (const m of ['0001_schema.sql', '0002_multitenant.sql', '0003_cf_rule_sync.sql', '0004_phase16_hardening.sql', '0005_fio_api_sync.sql', '0006_webhook_delivery_jobs.sql', '0007_webhook_delivery_fencing.sql', '0008_alert_outbox_and_subscription_history.sql', '0009_contract_drop_dlq_archive.sql']) {
+  for (const m of ['0001_schema.sql']) {
     sqlite.exec(readFileSync(resolve(__dirname, '../migrations', m), 'utf8'));
   }
   return { db: wrapAsD1(sqlite), sqlite };
@@ -213,6 +213,7 @@ describe('2xx happy path', () => {
     expect(row).toBeDefined();
     expect(row!.http_status).toBe(200);
     expect(row!.attempt).toBe(1);
+    expect(fetchSpy.mock.calls[0]?.[1]).toMatchObject({ redirect: 'manual' });
 
     fetchSpy.mockRestore();
   });
@@ -261,6 +262,33 @@ describe('400 → ack, no retry', () => {
     expect(row?.error_message).toBe('4xx_client_error');
 
     fetchSpy.mockRestore();
+  });
+});
+
+describe('redirect and callback policy failures are terminal', () => {
+  it('does not follow or retry a 302 response', async () => {
+    const { env, sqlite } = await makeEnv('redirect-secret');
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('', { status: 302 }));
+    const msg = makeMsg({ attempts: 1 });
+    await handleQueueBatch(makeBatch([msg]), env);
+    expect(fetchSpy.mock.calls[0]?.[1]).toMatchObject({ redirect: 'manual' });
+    expect(msg.ack).toHaveBeenCalledOnce();
+    expect(msg.retry).not.toHaveBeenCalled();
+    const job = sqlite.prepare(`SELECT status, last_error FROM webhook_delivery_jobs WHERE id=1`).get() as { status: string; last_error: string };
+    expect(job).toMatchObject({ status: 'terminal', last_error: 'redirect_not_allowed' });
+  });
+
+  it('revalidates a legacy stored URL against the current production allowlist before fetch', async () => {
+    const { env, sqlite } = await makeEnv('policy-secret');
+    env.ENV = 'production';
+    env.CALLBACK_HOST_ALLOWLIST = 'different.example.com';
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const msg = makeMsg({ attempts: 1 });
+    await handleQueueBatch(makeBatch([msg]), env);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(msg.ack).toHaveBeenCalledOnce();
+    const job = sqlite.prepare(`SELECT status, last_error FROM webhook_delivery_jobs WHERE id=1`).get() as { status: string; last_error: string };
+    expect(job).toMatchObject({ status: 'terminal', last_error: 'callback_url_not_allowed' });
   });
 });
 

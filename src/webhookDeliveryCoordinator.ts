@@ -44,6 +44,8 @@ export interface CoordinatorEnv {
   DB: D1Database;
   WEBHOOK_KEK: string;
   WEBHOOK_QUEUE: Queue<WebhookQueueMessage>;
+  ENV?: string;
+  CALLBACK_HOST_ALLOWLIST?: string;
 }
 
 /** Strictly decode the V2 fencing coordinates. Returns null for anything that is
@@ -130,9 +132,10 @@ export function createWebhookDeliveryCoordinator(
     }
 
     if (cls === 'terminal') {
+      const terminalKind = httpStatus >= 300 && httpStatus <= 399 ? 'redirect_not_allowed' : '4xx_client_error';
       const errorMessage = usedPrevSecret
-        ? `retry_with_prev:4xx_client_error:primary_${primaryStatus}_prev_${httpStatus}`
-        : '4xx_client_error';
+        ? `retry_with_prev:${terminalKind}:primary_${primaryStatus}_prev_${httpStatus}`
+        : terminalKind;
       await insertWebhookLogEntry(db, { ...logBase, http_status: httpStatus, error_message: errorMessage });
       await recordDeliveryOutcome(db, { deliveryJobId: m.delivery_job_id, ...fence, kind: 'terminal', httpStatus, error: errorMessage });
       log('webhook_4xx_ack', { delivery_id: m.delivery_id, consumer_app_id: m.consumer_app_id, http_status: httpStatus });

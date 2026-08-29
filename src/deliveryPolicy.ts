@@ -14,11 +14,12 @@ export const MAX_AUTOMATIC_HTTP_ATTEMPTS = 32;
  * Classify an HTTP response status into a transport outcome.
  * - 2xx        → delivered (transport accepted; business outcome is separate)
  * - 408/429/5xx→ retryable (transient)
- * - other 4xx  → terminal (consumer bug; repeating the same request won't help)
+ * - 3xx/other 4xx → terminal (redirects are forbidden; repeating configuration errors cannot help)
  * - anything else (defensive) → retryable
  */
 export function classifyHttpStatus(status: number): 'delivered' | 'retryable' | 'terminal' {
   if (status >= 200 && status <= 299) return 'delivered';
+  if (status >= 300 && status <= 399) return 'terminal';
   if (status === 408 || status === 429 || status >= 500) return 'retryable';
   if (status >= 400 && status <= 499) return 'terminal';
   return 'retryable';

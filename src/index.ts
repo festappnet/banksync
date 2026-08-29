@@ -14,8 +14,11 @@ export {
 export {
   buildWebhookEnvelope,
   signWebhook,
-  verifyWebhookSignature,
+  verifyWebhook,
+  WebhookVerificationError,
   type SignedWebhook,
+  type VerifyWebhookArgs,
+  type WebhookVerificationCode,
 } from "./relay.js";
 export { decodeRf, encodeRf } from "./iso11649.js";
 export {

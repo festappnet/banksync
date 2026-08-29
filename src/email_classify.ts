@@ -2,6 +2,7 @@ import type { ExtractedEmail } from './mime';
 import type { BankAccount } from './types';
 import type { ParsedEmailTransaction } from './parser';
 import { detectProvider, parseEmail } from './parser';
+import type { AuthenticatedEmailIdentity } from './email_auth';
 
 /**
  * Pure ingest decision for an inbound bank email. No I/O: the caller resolves the
@@ -38,7 +39,7 @@ export function parseAllowlist(raw: string | undefined): string[] {
  * subdomains); otherwise an exact email match. Domain matching leans on DKIM
  * alignment (checked earlier) so a forged From: from a bank domain cannot pass.
  */
-function senderAllowed(from: string | undefined, allowlist: string[]): boolean {
+function senderAllowed(from: string, allowlist: string[]): boolean {
   if (!from) return false;
   const fromLc = from.toLowerCase();
   const fromDomain = fromLc.includes('@') ? fromLc.slice(fromLc.indexOf('@') + 1) : '';
@@ -55,26 +56,16 @@ function senderAllowed(from: string | undefined, allowlist: string[]): boolean {
 
 export function classifyEmail(
   extracted: ExtractedEmail,
+  identity: AuthenticatedEmailIdentity,
   account: BankAccount | null,
   allowlist: string[],
 ): EmailOutcome {
-  // Step 2: Authentication-Results presence check
-  if (!extracted.authResults) {
-    return { kind: 'reject', reason: 'auth_results_missing', bankAccountId: null, received: false };
-  }
-
-  // Step 3: DKIM alignment / DMARC check
-  if (!extracted.isAligned) {
-    return { kind: 'reject', reason: `dkim_fail: ${extracted.authResults}`, bankAccountId: null, received: false };
-  }
-
-  // Step 4: sender allow-list
-  if (!senderAllowed(extracted.from, allowlist)) {
-    return { kind: 'reject', reason: `sender_not_allowed: ${extracted.from ?? 'unknown'}`, bankAccountId: null, received: false };
+  if (!senderAllowed(identity.sender, allowlist)) {
+    return { kind: 'reject', reason: 'sender_not_allowed', bankAccountId: null, received: false };
   }
 
   // Step 5: extract pairing_code from To: <code>@banksync.<domain>
-  const toAddress = extracted.to ?? '';
+  const toAddress = identity.recipient;
   const pairingCode = extractPairingCode(toAddress);
   if (!pairingCode) {
     return { kind: 'reject', reason: `no_pairing_code: ${toAddress}`, bankAccountId: null, received: false };

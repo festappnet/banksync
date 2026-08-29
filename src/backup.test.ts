@@ -3,7 +3,12 @@ import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { D1Database, D1Result, D1PreparedStatement, R2Bucket, R2Object } from '@cloudflare/workers-types';
-import { buildSqlDump, runBackupTick, TABLES, BACKUP_EXCLUDED } from './backup';
+import { buildSqlDump, runBackupTick as rawRunBackupTick, decryptBackup, TABLES, BACKUP_EXCLUDED } from './backup';
+
+const TEST_BACKUP_KEY = btoa('k'.repeat(32));
+function runBackupTick(db: D1Database, cfg: Parameters<typeof rawRunBackupTick>[1]) {
+  return rawRunBackupTick(db, { ...cfg, encryptionKey: TEST_BACKUP_KEY, keyVersion: 1 });
+}
 
 // ---- D1 facade over better-sqlite3 ----
 
@@ -145,7 +150,7 @@ function makeMockR2(): { bucket: R2Bucket; storage: MockR2Storage } {
 
 // ---- migrations ----
 
-const MIGRATIONS = ['0001_schema.sql', '0002_multitenant.sql', '0003_cf_rule_sync.sql', '0004_phase16_hardening.sql', '0005_fio_api_sync.sql', '0006_webhook_delivery_jobs.sql', '0007_webhook_delivery_fencing.sql', '0008_alert_outbox_and_subscription_history.sql', '0009_contract_drop_dlq_archive.sql'];
+const MIGRATIONS = ['0001_schema.sql'];
 
 function applyMigrations(sqlite: Database.Database): void {
   for (const m of MIGRATIONS) {
@@ -187,7 +192,7 @@ describe('backup', () => {
       const { sql, rowCounts } = await buildSqlDump(db);
 
       expect(sql).toContain('-- banksync backup');
-      expect(sql).toContain('-- schema_version=9');
+      expect(sql).toContain('-- schema_version=10');
       expect(sql).toContain('-- restore: re-apply migrations then load this file');
 
       // All tables should have 0 rows except schema_meta
@@ -280,6 +285,16 @@ describe('backup', () => {
       expect(sql).toContain('1990'); // amount_cents without quotes
       expect(sql).toContain("'CZK'"); // currency with quotes
     });
+
+    it('excludes ephemeral idempotency and rate-limit rows completely', async () => {
+      const { db, sqlite } = makeTestDb();
+      sqlite.prepare(`INSERT INTO idempotency_keys (key_hash, auth_principal, request_path, request_method, response_status, response_body) VALUES ('k','admin','/consumers','POST',201,'canary-plaintext-secret')`).run();
+      sqlite.prepare(`INSERT INTO rate_limit_buckets (principal, window_start, count) VALUES ('tenant:x','2026-01-01 00:00',1)`).run();
+      const { sql } = await buildSqlDump(db);
+      expect(sql).not.toContain('idempotency_keys');
+      expect(sql).not.toContain('rate_limit_buckets');
+      expect(sql).not.toContain('canary-plaintext-secret');
+    });
   });
 
   describe('runBackupTick', () => {
@@ -300,8 +315,29 @@ describe('backup', () => {
       const result = await runBackupTick(db, { bucket, prefix: 'banksync-test', retain: 8 });
 
       expect(result.uploaded).toBe(true);
-      expect(result.key).toMatch(/^banksync-test-\d{8}\.sql$/);
+      expect(result.key).toMatch(/^banksync-test-\d{8}\.sql\.enc$/);
       expect(result.size_bytes).toBeGreaterThan(0);
+    });
+
+    it('refuses to write plaintext when encryption configuration is absent', async () => {
+      const { db } = makeTestDb();
+      const { bucket, storage } = makeMockR2();
+      const result = await rawRunBackupTick(db, { bucket, prefix: 'banksync-test' });
+      expect(result).toEqual({ uploaded: false, skipped_reason: 'backup_encryption_not_configured' });
+      expect(storage.objects.size).toBe(0);
+    });
+
+    it('encrypted object contains no SQL canary and authentication detects tampering', async () => {
+      const { db, sqlite } = makeTestDb();
+      const { bucket, storage } = makeMockR2();
+      sqlite.prepare(`INSERT INTO bank_accounts (account_number, pairing_code, label) VALUES ('1234/2010','aabbccdd11','PII-CANARY')`).run();
+      const result = await runBackupTick(db, { bucket, prefix: 'banksync-test' });
+      const bytes = storage.objects.get(result.key!)!.data;
+      expect(new TextDecoder().decode(bytes)).not.toContain('PII-CANARY');
+      await expect(decryptBackup(bytes, TEST_BACKUP_KEY)).resolves.toContain('PII-CANARY');
+      const envelope = JSON.parse(new TextDecoder().decode(bytes));
+      envelope.ciphertext = envelope.ciphertext.slice(0, -2) + 'AA';
+      await expect(decryptBackup(new TextEncoder().encode(JSON.stringify(envelope)), TEST_BACKUP_KEY)).rejects.toThrow();
     });
 
     it('filename uses YYYYMMDD format (e.g. 20260508)', async () => {
@@ -310,7 +346,7 @@ describe('backup', () => {
 
       const result = await runBackupTick(db, { bucket, prefix: 'banksync-prod', retain: 8 });
 
-      const match = result.key?.match(/banksync-prod-(\d{8})\.sql/);
+      const match = result.key?.match(/banksync-prod-(\d{8})\.sql\.enc/);
       expect(match).not.toBeNull();
       const dateStr = match![1];
       expect(dateStr).toMatch(/^\d{8}$/);
@@ -436,8 +472,9 @@ describe('backup', () => {
       expect(storage.objects.size).toBe(1);
 
       // New content should be there
-      const newContent = new TextDecoder().decode(storage.objects.get(key2)!.data);
-      expect(newContent).toContain('bank_accounts');
+      const encryptedContent = storage.objects.get(key2)!.data;
+      expect(new TextDecoder().decode(encryptedContent)).not.toContain('bank_accounts');
+      await expect(decryptBackup(encryptedContent, TEST_BACKUP_KEY)).resolves.toContain('bank_accounts');
     });
 
     it('default retain=8 is applied when retain is undefined', async () => {
@@ -466,7 +503,9 @@ describe('backup', () => {
 
       const result = await runBackupTick(db, { bucket, prefix: 'banksync-test', retain: 8 });
 
-      const content = new TextDecoder().decode(storage.objects.get(result.key!)!.data);
+      const encrypted = storage.objects.get(result.key!)!.data;
+      expect(new TextDecoder().decode(encrypted)).not.toContain('MyAccount');
+      const content = await decryptBackup(encrypted, TEST_BACKUP_KEY);
       expect(content).toContain('INSERT INTO bank_accounts');
       expect(content).toContain("'1234/2010'");
       expect(content).toContain("'code0001'");

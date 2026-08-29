@@ -11,7 +11,38 @@ import {
   type CreateConsumerInput,
   type CreateSubscriptionInput,
   type ReplayWebhookInput,
+  validateCallbackUrl,
 } from './validation';
+
+describe('validateCallbackUrl', () => {
+  it('canonicalizes an exact production allowlist match', () => {
+    expect(validateCallbackUrl('https://CONSUMER.example.com./hook?x=1', {
+      environment: 'production',
+      allowlist: 'consumer.example.com',
+    })).toBe('https://consumer.example.com/hook?x=1');
+  });
+
+  it.each([
+    'http://consumer.example.com/hook',
+    'https://user:pass@consumer.example.com/hook',
+    'https://consumer.example.com/hook#fragment',
+    'https://localhost/hook',
+    'https://127.0.0.1/hook',
+    'https://[::1]/hook',
+    'https://service.internal/hook',
+    'https://service.test/hook',
+    'https://service.local/hook',
+    'https://service.onion/hook',
+    'https://evilconsumer.example.com/hook',
+    'https://consumer.example.com.evil.test/hook',
+  ])('rejects unsafe or suffix-confused production target %s', (url) => {
+    expect(() => validateCallbackUrl(url, { environment: 'production', allowlist: 'consumer.example.com' })).toThrow();
+  });
+
+  it('requires a nonempty allowlist in production', () => {
+    expect(() => validateCallbackUrl('https://consumer.example.com/hook', { environment: 'production' })).toThrow();
+  });
+});
 
 // ============================================================================
 // CreateBankAccountSchema

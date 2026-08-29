@@ -58,14 +58,7 @@ function wrapAsD1(sqlite: Database.Database): D1Database {
   return { prepare } as unknown as D1Database;
 }
 
-const MIGRATIONS = [
-  '0001_schema.sql',
-  '0002_multitenant.sql',
-  '0003_cf_rule_sync.sql',
-  '0004_phase16_hardening.sql',
-  '0005_fio_api_sync.sql',
-  '0006_webhook_delivery_jobs.sql',
-];
+const MIGRATIONS = ['0001_schema.sql'];
 
 function makeTestDb(): { db: D1Database; sqlite: Database.Database } {
   const sqlite = new Database(':memory:');
@@ -245,6 +238,31 @@ describe('checkIdempotency — principal namespacing', () => {
   });
 });
 
+describe('checkIdempotency — route and method namespacing', () => {
+  it('same caller key and body cannot replay across a different route or method', async () => {
+    const { db } = makeTestDb();
+    const bodyText = '{"x":1}';
+    const { req } = makeReq({ key: 'scoped-key', body: bodyText, method: 'POST', url: 'https://example.com/first' });
+    const first = await checkIdempotency({ db, request: req, authPrincipal: 'admin', requestBodyText: bodyText });
+    expect(first.kind).toBe('miss');
+    await recordIdempotency({
+      db,
+      keyHash: (first as { kind: 'miss'; keyHash: string }).keyHash,
+      authPrincipal: 'admin',
+      requestPath: '/first',
+      requestMethod: 'POST',
+      requestBodyHash: await sha256Hex(bodyText),
+      responseStatus: 200,
+      responseBody: '{"ok":true}',
+    });
+
+    const differentPath = makeReq({ key: 'scoped-key', body: bodyText, method: 'POST', url: 'https://example.com/second' });
+    await expect(checkIdempotency({ db, request: differentPath.req, authPrincipal: 'admin', requestBodyText: bodyText })).resolves.toMatchObject({ kind: 'miss' });
+    const differentMethod = makeReq({ key: 'scoped-key', body: bodyText, method: 'PUT', url: 'https://example.com/first' });
+    await expect(checkIdempotency({ db, request: differentMethod.req, authPrincipal: 'admin', requestBodyText: bodyText })).resolves.toMatchObject({ kind: 'miss' });
+  });
+});
+
 describe('recordIdempotency — 5xx NOT cached', () => {
   it('5xx response is not cached; next request sees miss', async () => {
     const { db, sqlite } = makeTestDb();
@@ -342,7 +360,7 @@ describe('checkIdempotency — empty body', () => {
       keyHash,
       authPrincipal: 'admin',
       requestPath: '/consumers',
-      requestMethod: 'DELETE',
+      requestMethod: 'POST',
       requestBodyHash: null,
       responseStatus: 204,
       responseBody: '',
@@ -378,34 +396,17 @@ describe('checkIdempotency — empty body', () => {
 });
 
 describe('recordIdempotency — concurrent insert race', () => {
-  it('two recordIdempotency calls with same keyHash → INSERT OR IGNORE keeps first; second is no-op', async () => {
+  it('atomically reserves a key so only one concurrent request can mutate', async () => {
     const { db, sqlite } = makeTestDb();
-    const keyHash = await sha256Hex('race-key:admin');
-
-    await Promise.all([
-      recordIdempotency({
-        db,
-        keyHash,
-        authPrincipal: 'admin',
-        requestPath: '/consumers',
-        requestMethod: 'POST',
-        requestBodyHash: null,
-        responseStatus: 201,
-        responseBody: '{"first":true}',
-      }),
-      recordIdempotency({
-        db,
-        keyHash,
-        authPrincipal: 'admin',
-        requestPath: '/consumers',
-        requestMethod: 'POST',
-        requestBodyHash: null,
-        responseStatus: 201,
-        responseBody: '{"second":true}',
-      }),
+    const a = makeReq({ key: 'race-key' });
+    const b = makeReq({ key: 'race-key' });
+    const results = await Promise.all([
+      checkIdempotency({ db, request: a.req, authPrincipal: 'admin', requestBodyText: a.bodyText }),
+      checkIdempotency({ db, request: b.req, authPrincipal: 'admin', requestBodyText: b.bodyText }),
     ]);
 
-    const rows = sqlite.prepare(`SELECT response_body FROM idempotency_keys WHERE key_hash = ?`).all(keyHash) as { response_body: string }[];
+    expect(results.map(result => result.kind).sort()).toEqual(['in_flight', 'miss']);
+    const rows = sqlite.prepare(`SELECT response_body FROM idempotency_keys`).all() as { response_body: string }[];
     expect(rows).toHaveLength(1);
   });
 });

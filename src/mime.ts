@@ -3,14 +3,11 @@ import PostalMime from 'postal-mime';
 export interface ExtractedEmail {
   subject: string | undefined;
   text: string;
-  from: string | undefined;
-  to: string | undefined;
+  /** Diagnostic MIME identity only; never use as routing/auth authority. */
+  fromHeader: string | undefined;
+  /** Diagnostic MIME identity only; never use as routing/auth authority. */
+  toHeader: string | undefined;
   messageId: string | undefined;
-  authResults: string | undefined;
-  dkimPass: boolean;
-  dkimDomain: string | undefined;
-  dmarcPass: boolean;
-  isAligned: boolean;
 }
 
 export async function extractEmailBody(
@@ -34,43 +31,11 @@ export async function extractEmailBody(
     ? toFirst.address.toLowerCase()
     : undefined;
 
-  const authResults = parsed.headers
-    .find((h) => h.key === 'authentication-results')
-    ?.value;
-
-  const dkimPass = authResults ? /dkim=pass/i.test(authResults) : false;
-
-  let dkimDomain: string | undefined;
-  if (dkimPass && authResults) {
-    const match = /dkim=pass[^;]*?\bheader\.d=([^\s;]+)/i.exec(authResults);
-    if (match?.[1]) {
-      dkimDomain = match[1].toLowerCase();
-    }
-  }
-
-  const dmarcPass = authResults ? /dmarc=pass/i.test(authResults) : false;
-
-  let isAligned = false;
-  if (dmarcPass) {
-    isAligned = true;
-  } else if (dkimPass && dkimDomain !== undefined && fromAddr !== undefined) {
-    const atIdx = fromAddr.indexOf('@');
-    const fromDomain = atIdx >= 0 ? fromAddr.slice(atIdx + 1) : fromAddr;
-    isAligned =
-      fromDomain === dkimDomain ||
-      fromDomain.endsWith('.' + dkimDomain);
-  }
-
   return {
     subject: parsed.subject,
     text,
-    from: fromAddr,
-    to: toAddr,
+    fromHeader: fromAddr,
+    toHeader: toAddr,
     messageId: parsed.messageId,
-    authResults,
-    dkimPass,
-    dkimDomain,
-    dmarcPass,
-    isAligned,
   };
 }
