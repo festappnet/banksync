@@ -171,9 +171,10 @@ export async function buildSqlDump(db: D1Database): Promise<{
 
     const cols = Object.keys(r.results[0]!);
     lines.push(`-- ${table} (${r.results.length} rows)`);
+    const insert = table === 'schema_meta' ? 'INSERT OR REPLACE INTO' : 'INSERT INTO';
     for (const row of r.results) {
       const values = cols.map(c => sqlValue(row[c])).join(', ');
-      lines.push(`INSERT INTO ${table} (${cols.join(', ')}) VALUES (${values});`);
+      lines.push(`${insert} ${table} (${cols.join(', ')}) VALUES (${values});`);
     }
     lines.push('');
   }
