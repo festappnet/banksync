@@ -115,7 +115,7 @@ the attacker's consumer to another tenant's account.
   production dependency audit, Wrangler Worker dry-run, and both fresh and
   recorded-0001–0009-to-0010 disposable Wrangler D1 migration flows.
 - Two independent `npm pack --ignore-scripts` runs produced byte-identical
-  `festapp-banksync-0.1.1.tgz` with SHA-256
+  `festapp-banksync-0.1.2.tgz` with SHA-256
   `0531be239d33ee543bfaa34b9b97a1da093c1106beed64dccb305af3fbaec57d`.
   It contains only `0001_schema.sql` and `0010_security_hardening.sql` under
   `migrations/` and has no weak verifier export.
