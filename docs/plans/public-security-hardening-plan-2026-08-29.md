@@ -6,7 +6,7 @@ Verification: release
 
 ## Outcome
 
-BankSync can be published and promoted as `festapp-banksync` only after its
+BankSync can be published and promoted as `@festapp/banksync` only after its
 production Worker and reusable package enforce tenant isolation, authenticate
 bank email using Cloudflare-owned envelope/authentication evidence, avoid
 persisting recoverable credentials, constrain outbound webhooks, expose only a
@@ -129,7 +129,7 @@ the attacker's consumer to another tenant's account.
   apparent test host.
 - GitHub still has no ruleset or main protection, secret scanning/push
   protection and Dependabot security updates are disabled, and npm returns 404
-  for `festapp-banksync`. Those external controls and publication remain
+  for `@festapp/banksync`. Those external controls and publication remain
   intentionally unapplied without separate authority.
 
 ## Target architecture and invariants
@@ -144,7 +144,7 @@ the attacker's consumer to another tenant's account.
 - Cross-consumer sharing is an administrator-only operation. A tenant may only
   create or remove a subscription whose account owner and consumer both equal
   its own `app_id`; owner auto-subscription remains the normal path.
-- `festapp-banksync` owns the canonical high-level webhook verification
+- `@festapp/banksync` owns the canonical high-level webhook verification
   contract: raw body HMAC, timestamp syntax and tolerance, delivery-ID header
   equality with parsed body, event/version validation, and structured errors.
 - Each consumer owns business settlement and its idempotent inbox. BankSync

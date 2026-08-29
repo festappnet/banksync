@@ -20,7 +20,7 @@ the latest version published to npm by the protected release workflow after its
 checksum and provenance are available:
 
 ```bash
-pnpm add festapp-banksync
+pnpm add @festapp/banksync
 ```
 
 The root export contains runtime-neutral parsing and webhook helpers:
@@ -31,15 +31,15 @@ import {
   parseEmail,
   verifyWebhook,
   type WebhookEnvelope,
-} from "festapp-banksync";
+} from "@festapp/banksync";
 ```
 
 The Cloudflare Worker is a separate export so importing the core does not pull
 Cloudflare bindings into application code:
 
 ```ts
-export { default } from "festapp-banksync/cloudflare";
-export type { Env } from "festapp-banksync/cloudflare";
+export { default } from "@festapp/banksync/cloudflare";
+export type { Env } from "@festapp/banksync/cloudflare";
 ```
 
 ## Deploy to Cloudflare
@@ -103,7 +103,7 @@ a typed verified envelope. It throws `WebhookVerificationError` with a stable
 code. There is intentionally no HMAC-only public verifier.
 
 ```ts
-import { verifyWebhook } from "festapp-banksync";
+import { verifyWebhook } from "@festapp/banksync";
 
 const bodyBytes = new Uint8Array(await request.arrayBuffer());
 const envelope = await verifyWebhook({
