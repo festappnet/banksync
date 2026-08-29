@@ -1187,7 +1187,7 @@ async function dispatch(
       sub = await createSubscription(env.DB, { app_id: input.app_id, bank_account_id: input.bank_account_id });
     } catch (err) {
       const msg = String(err);
-      if (msg.includes('subscription_cap_reached')) return jsonResponse({ error: msg }, 422);
+      if (msg.includes('subscription_cap_reached')) return jsonResponse({ error: 'subscription_cap_reached' }, 422);
       throw err;
     }
     return jsonResponse(sub, 201);
