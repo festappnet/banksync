@@ -35,24 +35,8 @@ export async function checkAndIncrement(
   const currentBucket = bucketKey(now);
   const windowStartBucket = bucketKey(windowStart);
 
-  // Read sum BEFORE increment (current request fits if count is at limit-1)
-  const sumRow = await db
-    .prepare(`SELECT COALESCE(SUM(count), 0) as total FROM rate_limit_buckets WHERE principal = ? AND window_start >= ?`)
-    .bind(principal, windowStartBucket)
-    .first<{ total: number }>();
-
-  const currentCount = sumRow?.total ?? 0;
-
-  if (currentCount >= cfg.limit) {
-    log('rate_limit_denied', { principal, count: currentCount, limit: cfg.limit });
-    return {
-      allowed: false,
-      count: currentCount,
-      limit: cfg.limit,
-      retryAfter: cfg.windowSeconds,
-    };
-  }
-
+  // Increment first with one atomic SQLite statement. Concurrent requests can
+  // no longer all observe the same pre-increment count and pass together.
   await db
     .prepare(`
       INSERT INTO rate_limit_buckets (principal, window_start, count)
@@ -62,9 +46,26 @@ export async function checkAndIncrement(
     .bind(principal, currentBucket)
     .run();
 
+  const sumRow = await db
+    .prepare(`SELECT COALESCE(SUM(count), 0) as total FROM rate_limit_buckets WHERE principal = ? AND window_start >= ?`)
+    .bind(principal, windowStartBucket)
+    .first<{ total: number }>();
+
+  const currentCount = sumRow?.total ?? 0;
+
+  if (currentCount > cfg.limit) {
+    log('rate_limit_denied', { principal, count: currentCount, limit: cfg.limit });
+    return {
+      allowed: false,
+      count: cfg.limit,
+      limit: cfg.limit,
+      retryAfter: cfg.windowSeconds,
+    };
+  }
+
   return {
     allowed: true,
-    count: currentCount + 1,
+    count: currentCount,
     limit: cfg.limit,
     retryAfter: 0,
   };

@@ -11,6 +11,7 @@ import type {
 import { extractEmailBody } from './mime';
 import type { ExtractedEmail } from './mime';
 import { classifyEmail, extractPairingCode, parseAllowlist } from './email_classify';
+import { authenticateEmailIdentity, EmailAuthenticationError, type EmailEnvelopeEvidence } from './email_auth';
 import { decryptSecret, encryptSecret, webhookEncrypt, type VersionedSecretEnv } from './crypto';
 import {
   assertSchemaVersion,
@@ -34,7 +35,6 @@ import {
   insertTransaction,
   insertParseLog,
   writeEvent,
-  getHealthData,
   getStatusData,
   listTransactions,
   listParseLog,
@@ -65,11 +65,12 @@ import {
   CreateSubscriptionSchema,
   ReplayWebhookSchema,
   UpdateFioTokenSchema,
+  validateCallbackUrl,
 } from './validation';
 import { handleQueueBatch, WebhookQueueMessage } from './queue';
 import { log, logError } from './logger';
 import { deleteRule as cfDeleteRule } from './cf_routing';
-import { resolveAuth, generateTenantAdminKey } from './auth';
+import { resolveAuth, generateTenantAdminKey, timingSafeEqual } from './auth';
 import type { AuthContext } from './auth';
 import { enqueueCreate, processOutbox } from './outbox';
 import * as cfIntent from './cfIntent';
@@ -125,6 +126,14 @@ export interface Env extends VersionedSecretEnv {
   ALERT_WEBHOOK_SECRET?: string;
   /** R2 bucket binding for weekly SQL backup. Undefined → backup disabled. */
   BACKUPS?: R2Bucket;
+  /** Trusted authserv-id observed and verified from Cloudflare Email Routing. */
+  EMAIL_AUTHSERV_ID?: string;
+  /** Exact comma-separated callback hostnames allowed in production. */
+  CALLBACK_HOST_ALLOWLIST?: string;
+  /** Active application-layer backup key version. */
+  BACKUP_ENCRYPTION_KEY_VERSION?: string;
+  BACKUP_ENCRYPTION_KEY_V1?: string;
+  BACKUP_ENCRYPTION_KEY_V2?: string;
 }
 
 interface ApiSyncQueueMessage {
@@ -149,7 +158,11 @@ function cfRoutingConfig(env: Env): import('./cf_routing').CfRoutingConfig {
 
 // ---- shared email processing logic (also called from /__test/email) ----
 
-export async function processEmail(rawStream: ReadableStream<Uint8Array>, env: Env): Promise<void> {
+export async function processEmail(
+  rawStream: ReadableStream<Uint8Array>,
+  env: Env,
+  envelope: EmailEnvelopeEvidence,
+): Promise<void> {
   // last-resort outer try/catch — must never rethrow
   let bodyText: string | undefined;
   try {
@@ -162,20 +175,30 @@ export async function processEmail(rawStream: ReadableStream<Uint8Array>, env: E
       const rawText = await new Response(rawStream).text().catch(() => '(failed to read raw)');
       await insertParseLog(env.DB, {
         error_message: `mime_parse_failed: ${err}`,
-        raw_data: rawText.slice(0, 65536),
+        raw_data: rawText === '(failed to read raw)' ? rawText : '(raw MIME omitted)',
       });
       log('email_rejected_mime', {});
       return;
     }
 
-    // Resolve the bank account (pure pairing extract + DB lookup), then classify.
+    let identity;
+    try {
+      identity = authenticateEmailIdentity(envelope, extracted);
+    } catch (err) {
+      const reason = err instanceof EmailAuthenticationError ? err.code : 'email_authentication_failed';
+      await insertParseLog(env.DB, { error_message: reason, raw_data: sanitizeDiagnosticRaw(extracted.text), external_id: extracted.messageId ?? null });
+      log('email_rejected_authentication', { reason });
+      return;
+    }
+
+    // Resolve the bank account from authenticated envelope recipient, then classify.
     // The lookup is read-only and harmless for emails that fail an earlier gate —
     // the outcome's bankAccountId stays null for pre-account rejects, so parse_log
     // rows are byte-identical to the inline pipeline this replaced.
     const allowlist = parseAllowlist(env.SENDER_ALLOWLIST);
-    const pairingCode = extractPairingCode(extracted.to ?? '');
+    const pairingCode = extractPairingCode(identity.recipient);
     const account = pairingCode ? await findBankAccountByPairingCode(env.DB, pairingCode) : null;
-    const outcome = classifyEmail(extracted, account, allowlist);
+    const outcome = classifyEmail(extracted, identity, account, allowlist);
 
     // email_received audit fires once the email clears the security gate, before
     // provider/parse — exactly the outcomes flagged `received` (account is
@@ -189,7 +212,7 @@ export async function processEmail(rawStream: ReadableStream<Uint8Array>, env: E
       await insertParseLog(env.DB, {
         bank_account_id: outcome.bankAccountId ?? null,
         error_message: outcome.reason,
-        raw_data: extracted.text,
+        raw_data: sanitizeDiagnosticRaw(extracted.text),
         external_id: extracted.messageId ?? null,
       });
       return;
@@ -211,7 +234,7 @@ export async function processEmail(rawStream: ReadableStream<Uint8Array>, env: E
       await insertParseLog(env.DB, {
         bank_account_id: acct.id,
         error_message: `db_insert_failed: ${err}`,
-        raw_data: JSON.stringify({ ...outcome.parsed, external_id: extracted.messageId ?? null }),
+        raw_data: sanitizeDiagnosticRaw(JSON.stringify({ ...outcome.parsed, external_id: extracted.messageId ?? null })),
         external_id: extracted.messageId ?? null,
       });
       return;
@@ -235,13 +258,20 @@ export async function processEmail(rawStream: ReadableStream<Uint8Array>, env: E
     try {
       await insertParseLog(env.DB, {
         error_message: `unhandled: ${err}`,
-        raw_data: bodyText ?? 'Body read failed',
+        raw_data: sanitizeDiagnosticRaw(bodyText ?? 'Body read failed'),
       });
     } catch {
       // swallow insertParseLog failure — we cannot let the catch block throw
     }
     logError('email_unhandled_exception', err, {});
   }
+}
+
+function sanitizeDiagnosticRaw(value: string): string {
+  return value
+    .slice(0, 4096)
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[email]')
+    .replace(/\b\d{6,}\b/g, '[number]');
 }
 
 // ---- helper: generate pairing_code (10 hex chars from 5 random bytes) ----
@@ -378,7 +408,7 @@ async function runBankApiSync(env: Env, account: ApiFetchAccount): Promise<BankA
         await insertParseLog(env.DB, {
           bank_account_id: account.id,
           error_message: `${err}`.replace(/^Error:\s*/, ''),
-          raw_data: JSON.stringify(item),
+          raw_data: JSON.stringify({ fields: Object.keys(item).sort() }),
         });
         continue;
       }
@@ -388,7 +418,7 @@ async function runBankApiSync(env: Env, account: ApiFetchAccount): Promise<BankA
         await insertParseLog(env.DB, {
           bank_account_id: account.id,
           error_message: 'outgoing_filtered',
-          raw_data: JSON.stringify(item),
+          raw_data: null,
         });
         continue;
       }
@@ -543,10 +573,9 @@ function notFound(): Response {
 async function healthResponse(env: Env): Promise<Response> {
   try {
     await assertSchemaVersion(env.DB);
-    const data = await getHealthData(env.DB);
-    return jsonResponse(data);
-  } catch (err) {
-    return jsonResponse({ ok: false, db: 'error', error: String(err) }, 503);
+    return jsonResponse({ ok: true });
+  } catch {
+    return jsonResponse({ ok: false }, 503);
   }
 }
 
@@ -563,7 +592,15 @@ async function runTestEmail(req: Request, env: Env): Promise<Response> {
   const raw = req.body;
   if (!raw) return new Response('Empty body', { status: 400 });
   // Wrap the body bytes as a ReadableStream<Uint8Array>
-  await processEmail(raw as ReadableStream<Uint8Array>, env);
+  const mailFrom = req.headers.get('x-test-mail-from');
+  const rcptTo = req.headers.get('x-test-rcpt-to');
+  if (!mailFrom || !rcptTo || !env.EMAIL_AUTHSERV_ID) return jsonResponse({ error: 'test_envelope_required' }, 400);
+  await processEmail(raw as ReadableStream<Uint8Array>, env, {
+    mailFrom,
+    rcptTo,
+    authenticationResults: req.headers.get('authentication-results'),
+    trustedAuthservId: env.EMAIL_AUTHSERV_ID,
+  });
   return new Response('ok', { status: 200 });
 }
 
@@ -572,9 +609,39 @@ async function runTestEmail(req: Request, env: Env): Promise<Response> {
 async function adminFetch(req: Request, env: Env): Promise<Response> {
   const url = new URL(req.url);
 
-  // Unauthenticated health / status — handled before schema check so /health can report 503
+  // Public health is deliberately the only anonymous information surface.
   if (url.pathname === '/health' && req.method === 'GET') return healthResponse(env);
-  if (url.pathname === '/status' && req.method === 'GET') return statusResponse(env);
+
+  // Detailed operator routes reject before schema/auth DB work unless the
+  // statically bound admin credential is already valid.
+  const isOperatorRoute = req.method === 'GET' && (url.pathname === '/status' || url.pathname === '/health/deep');
+  if (isOperatorRoute) {
+    const candidate = req.headers.get('X-Admin-Secret') ?? '';
+    if (!candidate || !env.ADMIN_SECRET || !timingSafeEqual(candidate, env.ADMIN_SECRET)) return unauthorized();
+    await assertSchemaVersion(env.DB);
+    const probeLimit = await checkAndIncrement(env.DB, 'admin:operator-probe', { windowSeconds: 60, limit: 60 });
+    if (!probeLimit.allowed) {
+      return jsonResponse({ error: 'rate_limited', retry_after: probeLimit.retryAfter }, 429, { 'Retry-After': String(probeLimit.retryAfter) });
+    }
+    if (url.pathname === '/status') return statusResponse(env);
+    const result = await deepHealth({
+      db: env.DB,
+      queue: env.WEBHOOK_QUEUE ?? null,
+      cf: cfRoutingConfig(env),
+      secrets: {
+        alertWebhookPresent: Boolean(env.ALERT_WEBHOOK_URL && env.ALERT_WEBHOOK_SECRET),
+        backupsPresent: Boolean(
+          env.BACKUPS
+          && Number.isInteger(Number(env.BACKUP_ENCRYPTION_KEY_VERSION))
+          && (env as unknown as Record<string, unknown>)[`BACKUP_ENCRYPTION_KEY_V${env.BACKUP_ENCRYPTION_KEY_VERSION}`],
+        ),
+        emailAuthPresent: Boolean(env.EMAIL_AUTHSERV_ID?.trim()),
+        callbackPolicyPresent: Boolean(env.CALLBACK_HOST_ALLOWLIST?.trim()),
+        isProduction: env.ENV === 'production',
+      },
+    });
+    return jsonResponse(result, result.status === 'red' ? 503 : 200);
+  }
 
   await assertSchemaVersion(env.DB);
 
@@ -585,23 +652,6 @@ async function adminFetch(req: Request, env: Env): Promise<Response> {
     authCtx.type === 'tenant' ? `tenant:${authCtx.app_id}` :
     'unauth';
 
-  // 2. /health/deep — unauth-allowed
-  if (url.pathname === '/health/deep' && req.method === 'GET') {
-    const result = await deepHealth({
-      db: env.DB,
-      queue: env.WEBHOOK_QUEUE ?? null,
-      cf: cfRoutingConfig(env),
-      secrets: {
-        // Existence only — never the secret values.
-        alertWebhookPresent: Boolean(env.ALERT_WEBHOOK_URL && env.ALERT_WEBHOOK_SECRET),
-        backupsPresent: Boolean(env.BACKUPS),
-        isProduction: env.ENV === 'production',
-      },
-    });
-    const httpStatus = result.status === 'red' ? 503 : 200;
-    return jsonResponse(result, httpStatus);
-  }
-
   // 3. Test-only email injection — gated on ENV !== 'production' and requires admin auth
   if (url.pathname === '/__test/email' && req.method === 'POST') {
     if (env.ENV === 'production') return notFound();
@@ -610,13 +660,18 @@ async function adminFetch(req: Request, env: Env): Promise<Response> {
   }
 
   // 4. All other endpoints require auth (admin or tenant)
-  if (authCtx.type === 'unauth') return unauthorized();
+  if (authCtx.type === 'unauth') {
+    const sourceIp = req.headers.get('cf-connecting-ip') ?? 'unknown';
+    const failed = await checkAndIncrement(env.DB, `auth-failed:${sourceIp}`, { windowSeconds: 60, limit: 20 });
+    if (!failed.allowed) return jsonResponse({ error: 'rate_limited', retry_after: failed.retryAfter }, 429, { 'Retry-After': String(failed.retryAfter) });
+    return unauthorized();
+  }
 
   // 5. Rate limit — tenants only. Admin (super-admin) bypasses the per-principal cap because
   // legitimate admin usage (E2E suites, bulk reconciliation, batch ops) routinely exceeds 100 req/min
   // and the threat model for admin-secret leak is "rotate the secret immediately", not "rate-limit".
-  if (authCtx.type === 'tenant') {
-    const rl = await checkAndIncrement(env.DB, authPrincipal);
+  {
+    const rl = await checkAndIncrement(env.DB, authPrincipal, authCtx.type === 'admin' ? { windowSeconds: 60, limit: 1_000 } : undefined);
     if (!rl.allowed) {
       return jsonResponse({ error: 'rate_limited', retry_after: rl.retryAfter }, 429, { 'Retry-After': String(rl.retryAfter) });
     }
@@ -626,28 +681,54 @@ async function adminFetch(req: Request, env: Env): Promise<Response> {
   const isMutating = req.method !== 'GET' && req.method !== 'HEAD';
   let bodyText = '';
   if (isMutating) {
-    bodyText = req.body ? await req.text() : '';
+    const read = await readBoundedBody(req, 256 * 1024);
+    if (read instanceof Response) return read;
+    bodyText = read;
+  }
+
+  const credentialRoute = isCredentialReturningRoute(url.pathname, req.method);
+  if (credentialRoute && req.headers.has('Idempotency-Key')) {
+    return jsonResponse({ error: 'idempotency_not_supported' }, 400);
   }
 
   // 7. Idempotency check (only for mutating methods)
-  if (isMutating) {
+  if (isMutating && !credentialRoute) {
     const idem = await checkIdempotency({ db: env.DB, request: req, authPrincipal, requestBodyText: bodyText });
     if (idem.kind === 'hit') return new Response(idem.body, { status: idem.status, headers: { 'Content-Type': 'application/json' } });
+    if (idem.kind === 'in_flight') return jsonResponse({ error: 'idempotency_request_in_flight' }, 409, { 'Retry-After': '1' });
     if (idem.kind === 'mismatch') return jsonResponse({ error: 'idempotency_key_body_mismatch' }, 422);
   }
 
   // 8. Dispatch to handler — capture response for audit + idempotency record
   const start = Date.now();
-  const handlerResponse = await dispatch(url, req, env, authCtx, bodyText);
+  let handlerResponse: Response;
+  try {
+    handlerResponse = await dispatch(url, req, env, authCtx, bodyText);
+  } catch (err) {
+    const idemKey = !credentialRoute ? req.headers.get('Idempotency-Key') : null;
+    if (idemKey && idemKey.length >= 1 && idemKey.length <= 255) {
+      await recordIdempotency({
+        db: env.DB,
+        keyHash: await sha256Hex(`${authPrincipal}\n${req.method.toUpperCase()}\n${url.pathname}\n${idemKey}`),
+        authPrincipal,
+        requestPath: url.pathname,
+        requestMethod: req.method,
+        requestBodyHash: bodyText.length > 0 ? await sha256Hex(bodyText) : null,
+        responseStatus: 500,
+        responseBody: '',
+      });
+    }
+    throw err;
+  }
   const duration = Date.now() - start;
   const respClone = handlerResponse.clone();
   const respBody = await respClone.text();
 
   // 9. Record idempotency cache (skip on server errors)
-  if (isMutating) {
+  if (isMutating && !credentialRoute) {
     const idemKey = req.headers.get('Idempotency-Key');
     if (idemKey && idemKey.length >= 1 && idemKey.length <= 255) {
-      const keyHash = await sha256Hex(`${idemKey}:${authPrincipal}`);
+      const keyHash = await sha256Hex(`${authPrincipal}\n${req.method.toUpperCase()}\n${url.pathname}\n${idemKey}`);
       const bodyHash = bodyText.length > 0 ? await sha256Hex(bodyText) : null;
       await recordIdempotency({
         db: env.DB,
@@ -678,6 +759,36 @@ async function adminFetch(req: Request, env: Env): Promise<Response> {
   }
 
   return handlerResponse;
+}
+
+function isCredentialReturningRoute(pathname: string, method: string): boolean {
+  if (method !== 'POST') return false;
+  return pathname === '/consumers' || /^\/consumers\/[^/]+\/(?:rotate-secret|rotate-admin-key)$/.test(pathname);
+}
+
+async function readBoundedBody(req: Request, maxBytes: number): Promise<string | Response> {
+  const declared = req.headers.get('content-length');
+  if (declared && (!/^\d+$/.test(declared) || Number(declared) > maxBytes)) {
+    return jsonResponse({ error: 'payload_too_large' }, 413);
+  }
+  if (!req.body) return '';
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > maxBytes) {
+      await reader.cancel('payload_too_large');
+      return jsonResponse({ error: 'payload_too_large' }, 413);
+    }
+    chunks.push(value);
+  }
+  const all = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) { all.set(chunk, offset); offset += chunk.byteLength; }
+  return new TextDecoder('utf-8', { fatal: true }).decode(all);
 }
 
 // ---- dispatch: all protected routes ----
@@ -963,6 +1074,13 @@ async function dispatch(
     if (authCtx.type === 'tenant') return forbidden();
     const input = parseOr400(CreateConsumerSchema, bodyText);
     if (input instanceof Response) return input;
+    let callbackUrl: string;
+    try {
+      callbackUrl = validateCallbackUrl(input.callback_url, { environment: env.ENV, allowlist: env.CALLBACK_HOST_ALLOWLIST });
+    } catch (err) {
+      if (err instanceof ValidationError) return jsonResponse({ error: err.message }, 400);
+      throw err;
+    }
     const plain = generateConsumerSecret();
     // secret_prefix: first 12 chars — captures 'whsec_' prefix + 6 chars of the key material
     const secretPrefix = plain.slice(0, 12);
@@ -970,7 +1088,7 @@ async function dispatch(
     const secretCipher = await webhookEncrypt(plain, env.WEBHOOK_KEK);
     const consumer = await createConsumer(env.DB, {
       app_id: input.app_id,
-      callback_url: input.callback_url,
+      callback_url: callbackUrl,
       secret_cipher: secretCipher,
       secret_hash: secretHash,
       secret_prefix: secretPrefix,
@@ -981,7 +1099,7 @@ async function dispatch(
     log('tenant_admin_key_issued', { app_id: input.app_id, admin_key_prefix: adminKeyPrefix });
     // Secret shown ONCE — log loudly
     log('consumer_secret_issued', { app_id: consumer.app_id, secret_prefix: secretPrefix });
-    return jsonResponse({ app_id: consumer.app_id, callback_url: consumer.callback_url, secret: plain, admin_key: adminKeyPlain, admin_key_prefix: adminKeyPrefix }, 201);
+    return jsonResponse({ app_id: consumer.app_id, callback_url: consumer.callback_url, secret: plain, admin_key: adminKeyPlain, admin_key_prefix: adminKeyPrefix }, 201, { 'Cache-Control': 'no-store' });
   }
 
   // GET /consumers — admin only
@@ -999,7 +1117,14 @@ async function dispatch(
     if (authCtx.type === 'tenant' && authCtx.app_id !== appId) return forbidden();
     const input = parseOr400(UpdateConsumerSchema, bodyText);
     if (input instanceof Response) return input;
-    const updated = await updateConsumer(env.DB, appId, input);
+    let callbackUrl: string;
+    try {
+      callbackUrl = validateCallbackUrl(input.callback_url, { environment: env.ENV, allowlist: env.CALLBACK_HOST_ALLOWLIST });
+    } catch (err) {
+      if (err instanceof ValidationError) return jsonResponse({ error: err.message }, 400);
+      throw err;
+    }
+    const updated = await updateConsumer(env.DB, appId, { callback_url: callbackUrl });
     if (!updated) return jsonResponse({ error: 'not_found' }, 404);
     log('consumer_callback_updated', { app_id: appId });
     return jsonResponse(updated);
@@ -1030,7 +1155,7 @@ async function dispatch(
       prevExpiresAt,
     });
     log('consumer_secret_rotated', { app_id: appId, secret_prefix: newPrefix });
-    return jsonResponse({ secret: newPlain });
+    return jsonResponse({ secret: newPlain }, 200, { 'Cache-Control': 'no-store' });
   }
 
   // POST /consumers/:app_id/rotate-admin-key — admin OR matching tenant
@@ -1043,7 +1168,7 @@ async function dispatch(
     const { plain, prefix, hash } = await generateTenantAdminKey();
     await setConsumerAdminKey(env.DB, appId, hash, prefix);
     log('tenant_admin_key_rotated', { app_id: appId, admin_key_prefix: prefix });
-    return jsonResponse({ admin_key: plain, admin_key_prefix: prefix }, 200);
+    return jsonResponse({ admin_key: plain, admin_key_prefix: prefix }, 200, { 'Cache-Control': 'no-store' });
   }
 
   // POST /subscriptions
@@ -1051,7 +1176,11 @@ async function dispatch(
     const input = parseOr400(CreateSubscriptionSchema, bodyText);
     if (input instanceof Response) return input;
     // Tenant scope: can only subscribe their own app_id
-    if (authCtx.type === 'tenant' && input.app_id !== authCtx.app_id) return forbidden();
+    if (authCtx.type === 'tenant') {
+      if (input.app_id !== authCtx.app_id) return forbidden();
+      const account = await findBankAccountById(env.DB, input.bank_account_id);
+      if (!account || account.owner_app_id !== authCtx.app_id) return forbidden();
+    }
     let sub;
     try {
       sub = await createSubscription(env.DB, { app_id: input.app_id, bank_account_id: input.bank_account_id });
@@ -1079,11 +1208,16 @@ async function dispatch(
   const deleteSubMatch = url.pathname.match(/^\/subscriptions\/(\d+)$/);
   if (deleteSubMatch && req.method === 'DELETE') {
     const id = parseInt(deleteSubMatch[1]!, 10);
-    // Tenant scope: verify subscription belongs to them
+    // Tenant can remove only its normal owner subscription. Cross-owner sharing
+    // is created and removed by an administrator only.
     if (authCtx.type === 'tenant') {
-      const subRows = await listSubscriptions(env.DB, { app_id: authCtx.app_id });
-      const owns = subRows.some(s => s.id === id);
-      if (!owns) return forbidden();
+      const sub = await env.DB.prepare(`
+        SELECT s.consumer_app_id, b.owner_app_id
+        FROM webhook_subscriptions s
+        JOIN bank_accounts b ON b.id = s.bank_account_id
+        WHERE s.id = ? AND s.deleted_at IS NULL
+      `).bind(id).first<{ consumer_app_id: string; owner_app_id: string | null }>();
+      if (!sub || sub.consumer_app_id !== authCtx.app_id || sub.owner_app_id !== authCtx.app_id) return forbidden();
     }
     await deleteSubscription(env.DB, id);
     return new Response(null, { status: 204 });
@@ -1104,8 +1238,9 @@ async function dispatch(
 
     if (input.tx_id) {
       // tx_id mode: ensure existing canonical jobs, then replay those exact IDs.
-      const txRow = await env.DB.prepare(`SELECT id FROM transactions WHERE id = ?`).bind(input.tx_id).first<{ id: number }>();
+      const txRow = await env.DB.prepare(`SELECT t.id, b.owner_app_id FROM transactions t JOIN bank_accounts b ON b.id = t.bank_account_id WHERE t.id = ?`).bind(input.tx_id).first<{ id: number; owner_app_id: string | null }>();
       if (!txRow) return jsonResponse({ error: 'transaction not found' }, 404);
+      if (authCtx.type === 'tenant' && txRow.owner_app_id !== authCtx.app_id) return forbidden();
       const coordinator = createWebhookDeliveryCoordinator(env);
       await ensureDeliveryJobs(env.DB, txRow.id);
       const jobs = (await findDeliveryJobsForTransaction(env.DB, txRow.id))
@@ -1140,12 +1275,7 @@ async function dispatch(
     const since = url.searchParams.get('since') ?? new Date(0).toISOString();
     const limitStr = url.searchParams.get('limit');
     const limit = limitStr ? Math.min(parseInt(limitStr, 10), 200) : 50;
-    const rows = await listTransactions(env.DB, since, limit);
-    // Tenant: filter to bank accounts they own
-    const filtered = authCtx.type === 'tenant'
-      ? await filterTxByTenantAccounts(env.DB, authCtx.app_id, rows)
-      : rows;
-    return jsonResponse(filtered);
+    return jsonResponse(await listTransactions(env.DB, since, limit, authCtx.type === 'tenant' ? authCtx.app_id : undefined));
   }
 
   // GET /parse-log
@@ -1153,11 +1283,7 @@ async function dispatch(
     const since = url.searchParams.get('since') ?? new Date(0).toISOString();
     const limitStr = url.searchParams.get('limit');
     const limit = limitStr ? Math.min(parseInt(limitStr, 10), 200) : 50;
-    const rows = await listParseLog(env.DB, since, limit);
-    const filtered = authCtx.type === 'tenant'
-      ? await filterParseLogByTenantAccounts(env.DB, authCtx.app_id, rows)
-      : rows;
-    return jsonResponse(filtered);
+    return jsonResponse(await listParseLog(env.DB, since, limit, authCtx.type === 'tenant' ? authCtx.app_id : undefined));
   }
 
   // GET /webhook-log
@@ -1165,12 +1291,7 @@ async function dispatch(
     const since = url.searchParams.get('since') ?? new Date(0).toISOString();
     const limitStr = url.searchParams.get('limit');
     const limit = limitStr ? Math.min(parseInt(limitStr, 10), 200) : 50;
-    const rows = await listWebhookLog(env.DB, since, limit);
-    // Tenant: filter by own consumer_app_id
-    const filtered = authCtx.type === 'tenant'
-      ? rows.filter(r => r.consumer_app_id === authCtx.app_id)
-      : rows;
-    return jsonResponse(filtered);
+    return jsonResponse(await listWebhookLog(env.DB, since, limit, authCtx.type === 'tenant' ? authCtx.app_id : undefined));
   }
 
   // GET /unmatched-mails — emails that didn't route to any bank account.
@@ -1242,31 +1363,6 @@ async function dispatch(
   return notFound();
 }
 
-// ---- tenant filter helpers ----
-
-async function getTenantAccountIds(db: D1Database, appId: string): Promise<Set<number>> {
-  const rows = await db.prepare(`SELECT id FROM bank_accounts WHERE owner_app_id = ?`).bind(appId).all<{ id: number }>();
-  return new Set(rows.results.map(r => r.id));
-}
-
-async function filterTxByTenantAccounts(
-  db: D1Database,
-  appId: string,
-  rows: Array<{ bank_account_id: number; [k: string]: unknown }>,
-): Promise<typeof rows> {
-  const ownIds = await getTenantAccountIds(db, appId);
-  return rows.filter(r => ownIds.has(r.bank_account_id));
-}
-
-async function filterParseLogByTenantAccounts(
-  db: D1Database,
-  appId: string,
-  rows: Array<{ bank_account_id: number | null; [k: string]: unknown }>,
-): Promise<typeof rows> {
-  const ownIds = await getTenantAccountIds(db, appId);
-  return rows.filter(r => r.bank_account_id !== null && ownIds.has(r.bank_account_id));
-}
-
 // ---- Worker export ----
 
 export default {
@@ -1283,15 +1379,27 @@ export default {
       return;
     }
 
-    await processEmail(message.raw as unknown as ReadableStream<Uint8Array>, env);
+    const trustedAuthservId = env.EMAIL_AUTHSERV_ID?.trim();
+    if (!trustedAuthservId) {
+      await insertParseLog(env.DB, { error_message: 'email_ingest_disabled_untrusted_authserv', raw_data: null });
+      log('email_rejected_authentication', { reason: 'trusted_authserv_not_configured' });
+      return;
+    }
+    await processEmail(message.raw as unknown as ReadableStream<Uint8Array>, env, {
+      mailFrom: message.from,
+      rcptTo: message.to,
+      authenticationResults: message.headers.get('authentication-results'),
+      trustedAuthservId,
+    });
   },
 
   async fetch(req: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     try {
       return await adminFetch(req, env);
     } catch (err) {
-      logError('admin_fetch_error', err, {});
-      return jsonResponse({ error: String(err) }, 500);
+      const requestId = crypto.randomUUID();
+      logError('admin_fetch_error', err, { request_id: requestId });
+      return jsonResponse({ error: 'internal_error', request_id: requestId }, 500);
     }
   },
 
@@ -1317,6 +1425,8 @@ export default {
           webhook_log_deleted: result.webhook_log_deleted,
           event_log_deleted: result.event_log_deleted,
           transactions_deleted: result.transactions_deleted,
+          idempotency_keys_deleted: result.idempotency_keys_deleted,
+          admin_audit_log_deleted: result.admin_audit_log_deleted,
           expired_prev_secrets_cleared: result.expired_prev_secrets_cleared,
         });
       } catch (err) {
@@ -1406,7 +1516,11 @@ export default {
     const dayOfWeek = new Date().getUTCDay();
     if (runMaintenance && dayOfWeek === 0 && env.BACKUPS) {
       try {
-        const backup = await runBackupTick(env.DB, { bucket: env.BACKUPS, prefix: 'banksync', retain: 8 });
+        const version = Number(env.BACKUP_ENCRYPTION_KEY_VERSION ?? '');
+        const encryptionKey = Number.isInteger(version)
+          ? env[`BACKUP_ENCRYPTION_KEY_V${version}` as 'BACKUP_ENCRYPTION_KEY_V1' | 'BACKUP_ENCRYPTION_KEY_V2']
+          : undefined;
+        const backup = await runBackupTick(env.DB, { bucket: env.BACKUPS, prefix: 'banksync', retain: 8, encryptionKey, keyVersion: version });
         log('backup_tick', { uploaded: backup.uploaded, key: backup.key ?? null, size_bytes: backup.size_bytes ?? null });
       } catch (err) {
         logError('backup_tick_failed', err, {});

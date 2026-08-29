@@ -12,6 +12,8 @@ export interface QueueEnv {
   DB: D1Database;
   WEBHOOK_KEK: string;
   WEBHOOK_QUEUE: Queue<WebhookQueueMessage>;
+  ENV?: string;
+  CALLBACK_HOST_ALLOWLIST?: string;
 }
 
 export interface WebhookQueueMessage {

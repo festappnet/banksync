@@ -12,8 +12,7 @@ export interface DeepHealthResult {
     queue_producer: HealthStatus;
     cf_api: HealthStatus;
     outbox_drift: HealthStatus;
-    /** Existence (never value) of ALERT_WEBHOOK_URL + BACKUPS. Red in production
-     * when either is missing — a silent "alerter/backup disabled" is a release blocker. */
+    /** Presence-only check for every security-critical production binding. */
     required_secrets: HealthStatus;
   };
   details: {
@@ -38,14 +37,17 @@ export interface DeepHealthArgs {
   secrets?: {
     alertWebhookPresent: boolean;
     backupsPresent: boolean;
+    emailAuthPresent: boolean;
+    callbackPolicyPresent: boolean;
     isProduction: boolean;
   };
 }
 
 function probeRequiredSecrets(secrets: DeepHealthArgs['secrets']): HealthStatus {
   if (!secrets) return 'green'; // not evaluated (e.g. unit tests)
-  const bothPresent = secrets.alertWebhookPresent && secrets.backupsPresent;
-  if (bothPresent) return 'green';
+  const allPresent = secrets.alertWebhookPresent && secrets.backupsPresent
+    && secrets.emailAuthPresent && secrets.callbackPolicyPresent;
+  if (allPresent) return 'green';
   // Missing a required binding is a release blocker in production, a warning elsewhere.
   return secrets.isProduction ? 'red' : 'yellow';
 }

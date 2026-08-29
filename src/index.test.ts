@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import type { D1Database, D1Result, D1PreparedStatement, Queue } from '@cloudflare/workers-types';
 import { resetSchemaCheckCache } from './db';
 import type { Env } from './cloudflare';
-import { processEmail } from './cloudflare';
+import { processEmail as processEmailWithEnvelope } from './cloudflare';
 import type { WebhookQueueMessage } from './queue';
 import { dispatchDueDeliveryJobs } from './webhookDelivery';
 
@@ -61,7 +61,7 @@ function wrapAsD1(sqlite: Database.Database): D1Database {
 
 function makeTestDb(): { db: D1Database; sqlite: Database.Database } {
   const sqlite = new Database(':memory:');
-  for (const m of ['0001_schema.sql', '0002_multitenant.sql', '0003_cf_rule_sync.sql', '0004_phase16_hardening.sql', '0005_fio_api_sync.sql', '0006_webhook_delivery_jobs.sql', '0007_webhook_delivery_fencing.sql', '0008_alert_outbox_and_subscription_history.sql', '0009_contract_drop_dlq_archive.sql']) {
+  for (const m of ['0001_schema.sql']) {
     sqlite.exec(readFileSync(resolve(__dirname, '../migrations', m), 'utf8'));
   }
   return { db: wrapAsD1(sqlite), sqlite };
@@ -92,6 +92,20 @@ function makeStream(text: string): ReadableStream<Uint8Array> {
       controller.enqueue(bytes);
       controller.close();
     },
+  });
+}
+
+/** Test-only adapter: production receives these facts from ForwardableEmailMessage. */
+async function processEmail(raw: ReadableStream<Uint8Array>, env: Env): Promise<void> {
+  const text = await new Response(raw).text();
+  const mailFrom = /^From:\s*([^\r\n]+)/im.exec(text)?.[1]?.trim() ?? '';
+  const rcptTo = /^To:\s*([^\r\n]+)/im.exec(text)?.[1]?.trim() ?? '';
+  const authenticationResults = /^Authentication-Results:\s*([^\r\n]+)/im.exec(text)?.[1]?.trim() ?? null;
+  await processEmailWithEnvelope(makeStream(text), env, {
+    mailFrom,
+    rcptTo,
+    authenticationResults,
+    trustedAuthservId: 'mx.cloudflare.net',
   });
 }
 
@@ -257,7 +271,7 @@ describe('email() — failure paths each write parse_log', () => {
 
     const logRow = sqlite.prepare(`SELECT * FROM parse_log LIMIT 1`).get() as Record<string, unknown> | undefined;
     expect(logRow).toBeDefined();
-    expect(String(logRow!.error_message)).toMatch(/mime_parse_failed|auth_results_missing/);
+    expect(String(logRow!.error_message)).toMatch(/mime_parse_failed|email_identity_missing/);
   });
 
   it('missing Authentication-Results writes parse_log', async () => {
@@ -278,7 +292,7 @@ describe('email() — failure paths each write parse_log', () => {
     await processEmail(raw, env);
 
     const row = sqlite.prepare(`SELECT error_message FROM parse_log LIMIT 1`).get() as { error_message: string } | undefined;
-    expect(row?.error_message).toBe('auth_results_missing');
+    expect(row?.error_message).toBe('trusted_authentication_missing');
   });
 
   it('DKIM alignment failure writes dkim_fail to parse_log', async () => {
@@ -301,7 +315,7 @@ describe('email() — failure paths each write parse_log', () => {
     await processEmail(makeStream(email), env);
 
     const row = sqlite.prepare(`SELECT error_message FROM parse_log LIMIT 1`).get() as { error_message: string } | undefined;
-    expect(row?.error_message).toMatch(/^dkim_fail:/);
+    expect(row?.error_message).toBe('authenticated_sender_not_aligned');
   });
 
   it('sender not in allow-list writes sender_not_allowed to parse_log', async () => {
@@ -324,7 +338,7 @@ describe('email() — failure paths each write parse_log', () => {
     await processEmail(makeStream(email), env);
 
     const row = sqlite.prepare(`SELECT error_message FROM parse_log LIMIT 1`).get() as { error_message: string } | undefined;
-    expect(row?.error_message).toMatch(/^sender_not_allowed:/);
+    expect(row?.error_message).toBe('sender_not_allowed');
   });
 
   it('domain-prefix allowlist (@fio.cz) accepts any user @fio.cz', async () => {
@@ -399,7 +413,7 @@ describe('email() — failure paths each write parse_log', () => {
     await processEmail(makeStream(email), env);
 
     const row = sqlite.prepare(`SELECT error_message FROM parse_log LIMIT 1`).get() as { error_message: string } | undefined;
-    expect(row?.error_message).toMatch(/^sender_not_allowed:/);
+    expect(row?.error_message).toBe('sender_not_allowed');
   });
 
   it('exact email allowlist still works alongside @-domain entries', async () => {
@@ -1176,13 +1190,19 @@ describe('/__test/email gated on ENV', () => {
 
   it('returns 200 when ENV=development', async () => {
     const { db, sqlite } = makeTestDb();
-    const env = makeEnv(db); // ENV='development'
+    const env = { ...makeEnv(db), EMAIL_AUTHSERV_ID: 'mx.cloudflare.net' }; // ENV='development'
     const { pairingCode } = await seedFullSetup(db, sqlite);
 
     const email = buildFioEmail(`${pairingCode}@banksync.festapp.net`);
     const req = new Request('http://localhost/__test/email', {
       method: 'POST',
-      headers: { 'X-Admin-Secret': env.ADMIN_SECRET, 'Content-Type': 'message/rfc822' },
+      headers: {
+        'X-Admin-Secret': env.ADMIN_SECRET,
+        'Content-Type': 'message/rfc822',
+        'X-Test-Mail-From': 'noreply@fio.cz',
+        'X-Test-Rcpt-To': `${pairingCode}@banksync.festapp.net`,
+        'Authentication-Results': 'mx.cloudflare.net; dmarc=pass header.from=fio.cz; dkim=pass header.d=fio.cz',
+      },
       body: email,
     });
     const res = await worker.fetch(req, env, fakeCtx);
@@ -1201,12 +1221,7 @@ describe('/health structure', () => {
     expect(res.status).toBe(200);
     const body = await res.json() as Record<string, unknown>;
     expect(body.ok).toBe(true);
-    expect(body.db).toBe('ok');
-    expect(typeof body.bank_accounts).toBe('number');
-    expect(typeof body.consumers).toBe('number');
-    expect('last_email_at' in body).toBe(true);
-    expect('last_tx_at' in body).toBe(true);
-    expect(typeof body.parse_errors_24h).toBe('number');
+    expect(body).toEqual({ ok: true });
   });
 });
 
@@ -1216,8 +1231,7 @@ describe('/status structure', () => {
   it('returns expected shape with service/bank_accounts/consumers/queues blocks', async () => {
     const { db } = makeTestDb();
     const env = makeEnv(db);
-    const req = new Request('http://localhost/status', { method: 'GET' });
-    const res = await worker.fetch(req, env, fakeCtx);
+    const res = await adminReq('GET', '/status', env);
     expect(res.status).toBe(200);
     const body = await res.json() as Record<string, unknown>;
     expect(body).toHaveProperty('service');
@@ -1231,6 +1245,14 @@ describe('/status structure', () => {
     expect('dlq_pending' in queues).toBe(false); // removed dead alias
     const service = body.service as Record<string, unknown>;
     expect(typeof service.parse_failures_24h).toBe('number');
+  });
+
+  it('does not expose detailed status anonymously', async () => {
+    const { db } = makeTestDb();
+    const env = makeEnv(db);
+    const res = await worker.fetch(new Request('http://localhost/status'), env, fakeCtx);
+    expect(res.status).toBe(401);
+    await expect(res.text()).resolves.not.toContain('bank_accounts');
   });
 });
 
@@ -1593,6 +1615,45 @@ describe('tenant scope — bank account isolation', () => {
     expect(accounts.length).toBe(1);
     expect(accounts[0]?.owner_app_id).toBe('festapp');
   });
+
+  it('tenant cannot subscribe itself to a foreign account, while admin can share explicitly', async () => {
+    const { db, sqlite } = makeTestDb();
+    const env = makeEnv(db);
+    sqlite.prepare(`INSERT INTO webhook_consumers (app_id, callback_url, secret_cipher, secret_hash, secret_prefix) VALUES ('owner', 'https://owner.example/hook', 'c', 'h', 'p')`).run();
+    sqlite.prepare(`INSERT INTO webhook_consumers (app_id, callback_url, secret_cipher, secret_hash, secret_prefix) VALUES ('attacker', 'https://attacker.example/hook', 'c', 'h', 'p')`).run();
+    sqlite.prepare(`INSERT INTO bank_accounts (account_number, pairing_code, owner_app_id) VALUES ('111/2010', 'aabbccdd11', 'owner')`).run();
+    const account = sqlite.prepare(`SELECT id FROM bank_accounts WHERE owner_app_id='owner'`).get() as { id: number };
+    const tenantKey = await seedTenantKey(sqlite, 'attacker');
+
+    const denied = await tenantReq('POST', '/subscriptions', env, tenantKey, { app_id: 'attacker', bank_account_id: account.id });
+    expect(denied.status).toBe(403);
+    expect((sqlite.prepare(`SELECT count(*) count FROM webhook_subscriptions`).get() as { count: number }).count).toBe(0);
+    expect((sqlite.prepare(`SELECT count(*) count FROM webhook_delivery_jobs`).get() as { count: number }).count).toBe(0);
+
+    const shared = await adminReq('POST', '/subscriptions', env, { app_id: 'attacker', bank_account_id: account.id });
+    expect(shared.status).toBe(201);
+  });
+
+  it('applies tenant ownership in SQL before transaction/log limits', async () => {
+    const { db, sqlite } = makeTestDb();
+    const env = makeEnv(db);
+    sqlite.prepare(`INSERT INTO webhook_consumers (app_id, callback_url, secret_cipher, secret_hash, secret_prefix) VALUES ('tenant', 'https://tenant.example/hook', 'c', 'h', 'p')`).run();
+    sqlite.prepare(`INSERT INTO webhook_consumers (app_id, callback_url, secret_cipher, secret_hash, secret_prefix) VALUES ('other', 'https://other.example/hook', 'c', 'h', 'p')`).run();
+    sqlite.prepare(`INSERT INTO bank_accounts (id, account_number, pairing_code, owner_app_id) VALUES (1,'111/2010','aabbccdd11','other')`).run();
+    sqlite.prepare(`INSERT INTO bank_accounts (id, account_number, pairing_code, owner_app_id) VALUES (2,'222/2010','aabbccdd22','tenant')`).run();
+    sqlite.prepare(`INSERT INTO transactions (id, bank_account_id, amount_cents, currency, source, date) VALUES (1,1,100,'CZK','email',datetime('now'))`).run();
+    sqlite.prepare(`INSERT INTO transactions (id, bank_account_id, amount_cents, currency, source, date) VALUES (2,2,200,'CZK','email',datetime('now'))`).run();
+    sqlite.prepare(`INSERT INTO parse_log (id, bank_account_id, error_message) VALUES (2,1,'foreign'),(1,2,'owned')`).run();
+    sqlite.prepare(`INSERT INTO webhook_log (id, delivery_id, consumer_app_id, attempt) VALUES (1,'FOREIGN','other',1),(2,'OWNED','tenant',1)`).run();
+    const tenantKey = await seedTenantKey(sqlite, 'tenant');
+
+    const transactions = await (await tenantReq('GET', '/transactions?limit=1', env, tenantKey)).json() as Array<{ bank_account_id: number }>;
+    expect(transactions).toEqual([expect.objectContaining({ bank_account_id: 2 })]);
+    const parseLogs = await (await tenantReq('GET', '/parse-log?limit=1', env, tenantKey)).json() as Array<{ error_message: string }>;
+    expect(parseLogs).toEqual([expect.objectContaining({ error_message: 'owned' })]);
+    const webhookLogs = await (await tenantReq('GET', '/webhook-log?limit=1', env, tenantKey)).json() as Array<{ delivery_id: string }>;
+    expect(webhookLogs).toEqual([expect.objectContaining({ delivery_id: 'OWNED' })]);
+  });
 });
 
 describe('admin POST /consumers — returns secret + admin_key', () => {
@@ -1613,6 +1674,43 @@ describe('admin POST /consumers — returns secret + admin_key', () => {
     expect(typeof body.admin_key).toBe('string');
     expect((body.admin_key as string).startsWith('bksk_')).toBe(true);
     expect(typeof body.admin_key_prefix).toBe('string');
+  });
+
+  it('rejects idempotency and never persists a credential response', async () => {
+    const { db, sqlite } = makeTestDb();
+    const env = makeEnv(db);
+    const res = await adminReq('POST', '/consumers', env, {
+      app_id: 'newapp',
+      callback_url: 'https://newapp.example.com/webhook',
+    }, { 'Idempotency-Key': 'must-not-cache' });
+    expect(res.status).toBe(400);
+    expect((sqlite.prepare(`SELECT count(*) count FROM idempotency_keys`).get() as { count: number }).count).toBe(0);
+    expect((sqlite.prepare(`SELECT count(*) count FROM webhook_consumers`).get() as { count: number }).count).toBe(0);
+  });
+});
+
+describe('bounded and non-sensitive HTTP failures', () => {
+  beforeEach(() => resetSchemaCheckCache());
+
+  it('rejects a declared oversized mutation before buffering it', async () => {
+    const { db } = makeTestDb();
+    const env = makeEnv(db);
+    const req = new Request('http://localhost/bank-accounts', {
+      method: 'POST',
+      headers: { 'X-Admin-Secret': env.ADMIN_SECRET, 'Content-Length': String(256 * 1024 + 1) },
+      body: '{}',
+    });
+    const res = await worker.fetch(req, env, fakeCtx);
+    expect(res.status).toBe(413);
+  });
+
+  it('returns a stable public error without database detail', async () => {
+    const env = makeEnv({ prepare: () => { throw new Error('SQL secret detail'); } } as unknown as D1Database);
+    const res = await worker.fetch(new Request('http://localhost/private', { headers: { 'X-Admin-Secret': env.ADMIN_SECRET } }), env, fakeCtx);
+    expect(res.status).toBe(500);
+    const body = await res.json() as Record<string, unknown>;
+    expect(body.error).toBe('internal_error');
+    expect(JSON.stringify(body)).not.toContain('SQL secret detail');
   });
 });
 
@@ -1741,14 +1839,21 @@ describe('GET /admin/audit-log — admin only', () => {
   });
 });
 
-describe('GET /health/deep — unauthenticated accessible', () => {
+describe('GET /health/deep — admin only', () => {
   beforeEach(() => resetSchemaCheckCache());
 
-  it('returns expected shape without auth', async () => {
+  it('rejects anonymous requests before active probes', async () => {
     const { db } = makeTestDb();
     const env = makeEnv(db);
     const req = new Request('http://localhost/health/deep', { method: 'GET' });
     const res = await worker.fetch(req, env, fakeCtx);
+    expect(res.status).toBe(401);
+  });
+
+  it('returns the operator shape with admin auth', async () => {
+    const { db } = makeTestDb();
+    const env = makeEnv(db);
+    const res = await adminReq('GET', '/health/deep', env);
     expect([200, 503]).toContain(res.status);
     const body = await res.json() as Record<string, unknown>;
     expect(['green', 'yellow', 'red']).toContain(body.status);

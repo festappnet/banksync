@@ -7,6 +7,10 @@ export interface BackupConfig {
   prefix: string;
   /** Number of latest backups to retain in R2. Older ones deleted on each tick. */
   retain?: number;
+  /** Independent 32-byte base64 AES-GCM key. Required when bucket is bound. */
+  encryptionKey?: string | undefined;
+  /** Positive integer identifying BACKUP_ENCRYPTION_KEY_Vn. */
+  keyVersion?: number | undefined;
 }
 
 export interface BackupResult {
@@ -36,16 +40,89 @@ export const TABLES = [
   'event_log',
   'schema_meta',
   'cf_routing_outbox',
-  'idempotency_keys',
   'admin_audit_log',
-  'rate_limit_buckets',
 ];
 
 /** Application tables deliberately NOT backed up, each with a stated reason.
  * A table must be in TABLES or here — the completeness test enforces it. */
 export const BACKUP_EXCLUDED: Record<string, string> = {
-  // (none currently — every application table is backed up)
+  idempotency_keys: 'ephemeral response cache; may contain sensitive historic responses',
+  rate_limit_buckets: 'ephemeral abuse-control counters',
 };
+
+export interface EncryptedBackupEnvelope {
+  format: 'banksync-backup';
+  version: 1;
+  key_version: number;
+  algorithm: 'AES-256-GCM';
+  created_at: string;
+  iv: string;
+  ciphertext: string;
+}
+
+function base64(bytes: Uint8Array): string {
+  let value = '';
+  for (const byte of bytes) value += String.fromCharCode(byte);
+  return btoa(value);
+}
+
+function fromBase64(value: string): Uint8Array {
+  const decoded = atob(value);
+  return Uint8Array.from(decoded, char => char.charCodeAt(0));
+}
+
+async function importBackupKey(encoded: string): Promise<CryptoKey> {
+  const bytes = fromBase64(encoded);
+  if (bytes.byteLength !== 32) throw new Error('backup_encryption_key_must_be_32_bytes');
+  return crypto.subtle.importKey('raw', bytes.buffer as ArrayBuffer, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+}
+
+function backupAad(envelope: Pick<EncryptedBackupEnvelope, 'format' | 'version' | 'key_version' | 'algorithm' | 'created_at'>): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify(envelope));
+}
+
+export async function encryptBackup(sql: string, encodedKey: string, keyVersion: number): Promise<Uint8Array> {
+  if (!Number.isInteger(keyVersion) || keyVersion < 1) throw new Error('invalid_backup_key_version');
+  const metadata = {
+    format: 'banksync-backup' as const,
+    version: 1 as const,
+    key_version: keyVersion,
+    algorithm: 'AES-256-GCM' as const,
+    created_at: new Date().toISOString(),
+  };
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: iv.buffer as ArrayBuffer, additionalData: backupAad(metadata).buffer as ArrayBuffer, tagLength: 128 },
+    await importBackupKey(encodedKey),
+    new TextEncoder().encode(sql),
+  );
+  const envelope: EncryptedBackupEnvelope = {
+    ...metadata,
+    iv: base64(iv),
+    ciphertext: base64(new Uint8Array(ciphertext)),
+  };
+  return new TextEncoder().encode(JSON.stringify(envelope));
+}
+
+export async function decryptBackup(bytes: Uint8Array, encodedKey: string): Promise<string> {
+  const parsed = JSON.parse(new TextDecoder().decode(bytes)) as EncryptedBackupEnvelope;
+  if (parsed.format !== 'banksync-backup' || parsed.version !== 1 || parsed.algorithm !== 'AES-256-GCM') {
+    throw new Error('unsupported_backup_format');
+  }
+  const metadata = {
+    format: parsed.format,
+    version: parsed.version,
+    key_version: parsed.key_version,
+    algorithm: parsed.algorithm,
+    created_at: parsed.created_at,
+  };
+  const plaintext = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: fromBase64(parsed.iv).buffer as ArrayBuffer, additionalData: backupAad(metadata).buffer as ArrayBuffer, tagLength: 128 },
+    await importBackupKey(encodedKey),
+    fromBase64(parsed.ciphertext).buffer as ArrayBuffer,
+  );
+  return new TextDecoder().decode(plaintext);
+}
 
 function dateKey(d: Date = new Date()): string {
   const year = d.getUTCFullYear();
@@ -111,15 +188,20 @@ export async function runBackupTick(db: D1Database, cfg: BackupConfig): Promise<
   if (!cfg.bucket) {
     return { uploaded: false, skipped_reason: 'r2_bucket_unbound' };
   }
+  if (!cfg.encryptionKey || !cfg.keyVersion) {
+    return { uploaded: false, skipped_reason: 'backup_encryption_not_configured' };
+  }
 
   const { sql, rowCounts } = await buildSqlDump(db);
-  const key = `${cfg.prefix}-${dateKey()}.sql`;
-  const buf = new TextEncoder().encode(sql);
+  const key = `${cfg.prefix}-${dateKey()}.sql.enc`;
+  const buf = await encryptBackup(sql, cfg.encryptionKey, cfg.keyVersion);
 
   await cfg.bucket.put(key, buf, {
-    httpMetadata: { contentType: 'application/sql' },
+    httpMetadata: { contentType: 'application/octet-stream' },
     customMetadata: {
       banksync_table_count: String(TABLES.length),
+      banksync_backup_format: 'aes-256-gcm-v1',
+      banksync_backup_key_version: String(cfg.keyVersion),
       banksync_total_rows: String(Object.values(rowCounts).reduce((a, b) => a + b, 0)),
     },
   });

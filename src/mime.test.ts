@@ -50,11 +50,7 @@ describe('extractEmailBody', () => {
       body: 'Na váš účet dorazila platba 100,00 CZK.',
     });
     const result = await extractEmailBody(toStream(raw));
-    expect(result.dkimPass).toBe(true);
-    expect(result.dmarcPass).toBe(true);
-    expect(result.dkimDomain).toBe('fio.cz');
-    expect(result.isAligned).toBe(true);
-    expect(result.from).toBe('noreply@fio.cz');
+    expect(result.fromHeader).toBe('noreply@fio.cz');
     expect(result.subject).toBe('Fio: Příchozí platba');
     expect(result.text).toContain('platba');
   });
@@ -78,10 +74,8 @@ describe('extractEmailBody', () => {
       authResults: 'mx.cf.com; dkim=pass header.d=attacker.example; spf=fail',
     });
     const result = await extractEmailBody(toStream(raw));
-    expect(result.dkimPass).toBe(true);
-    expect(result.dkimDomain).toBe('attacker.example');
-    expect(result.dmarcPass).toBe(false);
-    expect(result.isAligned).toBe(false);
+    expect(result.fromHeader).toBe('noreply@fio.cz');
+    expect(result).not.toHaveProperty('authResults');
   });
 
   // ----- test 4: subdomain alignment — mail.fio.cz aligned with fio.cz -----
@@ -91,10 +85,7 @@ describe('extractEmailBody', () => {
       authResults: 'mx.cf.com; dkim=pass header.d=fio.cz',
     });
     const result = await extractEmailBody(toStream(raw));
-    expect(result.dkimPass).toBe(true);
-    expect(result.dkimDomain).toBe('fio.cz');
-    expect(result.dmarcPass).toBe(false);
-    expect(result.isAligned).toBe(true);
+    expect(result.fromHeader).toBe('noreply@mail.fio.cz');
   });
 
   // ----- test 5: DMARC pass overrides DKIM domain mismatch -----
@@ -105,20 +96,14 @@ describe('extractEmailBody', () => {
         'mx.cf.com; dkim=pass header.d=attacker.example; dmarc=pass',
     });
     const result = await extractEmailBody(toStream(raw));
-    expect(result.dmarcPass).toBe(true);
-    expect(result.dkimDomain).toBe('attacker.example');
-    expect(result.isAligned).toBe(true);
+    expect(result).not.toHaveProperty('authResults');
   });
 
   // ----- test 6: No Authentication-Results header -----
   it('missing Authentication-Results → all auth false, authResults undefined', async () => {
     const raw = makeRaw({});
     const result = await extractEmailBody(toStream(raw));
-    expect(result.authResults).toBeUndefined();
-    expect(result.dkimPass).toBe(false);
-    expect(result.dmarcPass).toBe(false);
-    expect(result.isAligned).toBe(false);
-    expect(result.dkimDomain).toBeUndefined();
+    expect(result).not.toHaveProperty('authResults');
   });
 
   // ----- test 7: HTML-only body -----

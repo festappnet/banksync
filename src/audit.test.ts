@@ -58,15 +58,7 @@ function wrapAsD1(sqlite: Database.Database): D1Database {
   return { prepare } as unknown as D1Database;
 }
 
-const MIGRATIONS = [
-  '0001_schema.sql',
-  '0002_multitenant.sql',
-  '0003_cf_rule_sync.sql',
-  '0004_phase16_hardening.sql',
-  '0005_fio_api_sync.sql',
-  '0006_webhook_delivery_jobs.sql',
-  '0007_webhook_delivery_fencing.sql', '0008_alert_outbox_and_subscription_history.sql', '0009_contract_drop_dlq_archive.sql',
-];
+const MIGRATIONS = ['0001_schema.sql'];
 
 function makeTestDb(): { db: D1Database; sqlite: Database.Database } {
   const sqlite = new Database(':memory:');
@@ -233,10 +225,11 @@ describe('redactBodyForAudit — strips sensitive keys', () => {
     expect(output.items[1]!['token']).toBe('[REDACTED]');
   });
 
-  it('on invalid JSON: returns input truncated to 4KB (no throw)', () => {
-    const invalid = 'not-json-{{{';
+  it('on invalid JSON: stores no caller-controlled bytes', () => {
+    const invalid = 'not-json-{{{ plaintext-secret';
     const result = redactBodyForAudit(invalid);
-    expect(result).toBe(invalid);
+    expect(result).toBe('[UNPARSEABLE BODY REDACTED]');
+    expect(result).not.toContain('plaintext-secret');
     expect(new TextEncoder().encode(result).length).toBeLessThanOrEqual(4096);
   });
 

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildWebhookEnvelope, signWebhook, verifyWebhookSignature } from './relay';
+import { buildWebhookEnvelope, signWebhook, verifyWebhook, WebhookVerificationError } from './relay';
 import type { Transaction } from './types';
 
 const stubTx: Transaction = {
@@ -27,7 +27,7 @@ const stubTx: Transaction = {
   external_id: null,
 };
 
-const DELIVERY_ID = '01HXYZABC123ABCDEF';
+const DELIVERY_ID = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
 const PAIRING_CODE = 'a3f92c1e44';
 const SECRET = 'super-secret-key';
 const TIMESTAMP = 1746710400;
@@ -47,6 +47,19 @@ async function hmacSha256(secret: string, data: Uint8Array): Promise<ArrayBuffer
     ['sign'],
   );
   return globalThis.crypto.subtle.sign('HMAC', key, data.buffer as ArrayBuffer);
+}
+
+async function verificationArgs(envelope: unknown, deliveryId = DELIVERY_ID, timestamp = TIMESTAMP) {
+  const bodyBytes = new TextEncoder().encode(JSON.stringify(envelope));
+  const signing = new TextEncoder().encode(`${timestamp}.${deliveryId}.${new TextDecoder().decode(bodyBytes)}`);
+  return {
+    secret: SECRET,
+    timestamp: String(timestamp),
+    deliveryId,
+    bodyBytes,
+    signature: `sha256=${hex(await hmacSha256(SECRET, signing))}`,
+    nowSeconds: TIMESTAMP,
+  };
 }
 
 describe('buildWebhookEnvelope', () => {
@@ -78,11 +91,12 @@ describe('signWebhook', () => {
       signature: signed.headers['X-BankSync-Signature'],
     };
 
-    await expect(verifyWebhookSignature(input)).resolves.toBe(true);
-    await expect(verifyWebhookSignature({
+    await expect(verifyWebhook({ ...input, nowSeconds: TIMESTAMP })).resolves.toEqual(envelope);
+    await expect(verifyWebhook({
       ...input,
       bodyBytes: new TextEncoder().encode('{}'),
-    })).resolves.toBe(false);
+      nowSeconds: TIMESTAMP,
+    })).rejects.toMatchObject({ code: 'signature_invalid' } satisfies Partial<WebhookVerificationError>);
   });
 
   it('round-trip determinism — same inputs produce identical bodyBytes and signature', async () => {
@@ -158,5 +172,30 @@ describe('signWebhook', () => {
 
     const parsed = JSON.parse(new TextDecoder().decode(bodyBytes));
     expect(parsed.event_version).toBe('1');
+  });
+});
+
+describe('verifyWebhook', () => {
+  const envelope = buildWebhookEnvelope({ delivery_id: DELIVERY_ID, pairing_code: PAIRING_CODE, transaction: stubTx });
+
+  it('rejects stale and future timestamps', async () => {
+    await expect(verifyWebhook(await verificationArgs(envelope, DELIVERY_ID, TIMESTAMP - 301))).rejects.toMatchObject({ code: 'timestamp_out_of_range' });
+    await expect(verifyWebhook(await verificationArgs(envelope, DELIVERY_ID, TIMESTAMP + 301))).rejects.toMatchObject({ code: 'timestamp_out_of_range' });
+  });
+
+  it('rejects malformed signatures and delivery header/body mismatch', async () => {
+    await expect(verifyWebhook({ ...(await verificationArgs(envelope)), signature: 'nope' })).rejects.toMatchObject({ code: 'signature_invalid' });
+    await expect(verifyWebhook(await verificationArgs(envelope, 'DIFFERENT-DELIVERY'))).rejects.toMatchObject({ code: 'delivery_id_mismatch' });
+  });
+
+  it('rejects unsupported events and versions after authenticating exact bytes', async () => {
+    await expect(verifyWebhook(await verificationArgs({ ...envelope, event: 'transaction.changed' }))).rejects.toMatchObject({ code: 'event_unsupported' });
+    await expect(verifyWebhook(await verificationArgs({ ...envelope, event_version: '2' }))).rejects.toMatchObject({ code: 'event_version_unsupported' });
+  });
+
+  it('rejects an authenticated envelope that does not satisfy the complete public type contract', async () => {
+    await expect(verifyWebhook(await verificationArgs({ ...envelope, delivery_id: 'not-a-ulid' }, 'not-a-ulid'))).rejects.toMatchObject({ code: 'body_invalid' });
+    await expect(verifyWebhook(await verificationArgs({ ...envelope, data: { ...stubTx, bank_account_id: '2' } }))).rejects.toMatchObject({ code: 'body_invalid' });
+    await expect(verifyWebhook(await verificationArgs({ ...envelope, data: { ...stubTx, currency: 'czk' } }))).rejects.toMatchObject({ code: 'body_invalid' });
   });
 });

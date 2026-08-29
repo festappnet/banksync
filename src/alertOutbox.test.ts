@@ -11,11 +11,7 @@ import {
   enqueueTerminalIncident,
 } from './alertOutbox';
 
-const MIGRATIONS = [
-  '0001_schema.sql', '0002_multitenant.sql', '0003_cf_rule_sync.sql',
-  '0004_phase16_hardening.sql', '0005_fio_api_sync.sql',
-  '0006_webhook_delivery_jobs.sql', '0007_webhook_delivery_fencing.sql', '0008_alert_outbox_and_subscription_history.sql', '0009_contract_drop_dlq_archive.sql',
-];
+const MIGRATIONS = ['0001_schema.sql'];
 
 function wrapAsD1(sqlite: Database.Database): D1Database {
   return {

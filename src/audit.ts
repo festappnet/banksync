@@ -46,7 +46,7 @@ export function redactBodyForAudit(body: string): string {
     const redacted = redactObject(parsed);
     return truncateTo4KB(JSON.stringify(redacted));
   } catch {
-    return truncateTo4KB(body);
+    return '[UNPARSEABLE BODY REDACTED]';
   }
 }
 

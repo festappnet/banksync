@@ -113,6 +113,44 @@ export const UpdateConsumerSchema = v.object({
 
 export type UpdateConsumerInput = v.InferOutput<typeof UpdateConsumerSchema>;
 
+const SPECIAL_HOSTS = new Set([
+  'localhost', 'localhost.localdomain', 'local', 'internal', 'test', 'invalid',
+  'example', 'onion', 'home.arpa',
+]);
+const SPECIAL_SUFFIXES = ['.localhost', '.local', '.internal', '.test', '.invalid', '.example', '.onion', '.home.arpa'];
+
+function isIpLiteral(hostname: string): boolean {
+  if (hostname.startsWith('[') || hostname.endsWith(']')) return true;
+  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(hostname);
+}
+
+/** Exact-host callback policy. The returned URL is canonical and safe to persist. */
+export function validateCallbackUrl(
+  raw: string,
+  options: { environment?: string | undefined; allowlist?: string | undefined },
+): string {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new ValidationError([], 'invalid_callback_url');
+  }
+  const hostname = url.hostname.toLowerCase().replace(/\.$/, '');
+  if (
+    url.protocol !== 'https:' || url.username || url.password || url.hash ||
+    !hostname || SPECIAL_HOSTS.has(hostname) || SPECIAL_SUFFIXES.some(suffix => hostname.endsWith(suffix)) ||
+    isIpLiteral(hostname)
+  ) {
+    throw new ValidationError([], 'invalid_callback_url');
+  }
+  url.hostname = hostname;
+  const allowed = (options.allowlist ?? '').split(',').map(value => value.trim().toLowerCase().replace(/\.$/, '')).filter(Boolean);
+  if (options.environment === 'production' && (!allowed.length || !allowed.includes(hostname))) {
+    throw new ValidationError([], 'callback_host_not_allowed');
+  }
+  return url.toString();
+}
+
 // ============================================================================
 // POST /subscriptions
 // ============================================================================

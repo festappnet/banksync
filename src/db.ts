@@ -9,7 +9,7 @@ import { resolveVariableSymbol } from './referenceCandidates';
 // (8) and the contract-cleanup schema (9). Two adjacent versions so neither
 // deploy order (code-before-migration or migration-before-code) causes a global
 // 503. Older expand versions (6, 7) are gone from every environment.
-const SUPPORTED_SCHEMA_VERSIONS = ['8', '9'] as const;
+const SUPPORTED_SCHEMA_VERSIONS = ['10'] as const;
 type SupportedSchemaVersion = (typeof SUPPORTED_SCHEMA_VERSIONS)[number];
 
 const _checkedDbs = new Set<D1Database>();
@@ -704,28 +704,34 @@ export async function listSubscriptions(db: D1Database, filters?: {
 // ---- transactions list (admin query) ----
 
 const SQL_LIST_TRANSACTIONS = `SELECT id, bank_account_id, amount_cents, currency, vs, source, date, external_id, transaction_id, sender_name, counter_account, bank_code, bank_name, message, created_at FROM transactions WHERE created_at > datetime(?) ORDER BY id LIMIT ?`;
+const SQL_LIST_TRANSACTIONS_BY_OWNER = `SELECT t.id, t.bank_account_id, t.amount_cents, t.currency, t.vs, t.source, t.date, t.external_id, t.transaction_id, t.sender_name, t.counter_account, t.bank_code, t.bank_name, t.message, t.created_at FROM transactions t JOIN bank_accounts b ON b.id = t.bank_account_id WHERE b.owner_app_id = ? AND t.created_at > datetime(?) ORDER BY t.id LIMIT ?`;
 
-export async function listTransactions(db: D1Database, since: string, limit: number): Promise<Array<{
+export async function listTransactions(db: D1Database, since: string, limit: number, ownerAppId?: string): Promise<Array<{
   id: number; bank_account_id: number; amount_cents: number; currency: string;
   vs: string | null; source: string; date: string; external_id: string | null;
   transaction_id: string | null; sender_name: string | null; counter_account: string | null;
   bank_code: string | null; bank_name: string | null; message: string | null; created_at: string;
 }>> {
   type Row = { id: number; bank_account_id: number; amount_cents: number; currency: string; vs: string | null; source: string; date: string; external_id: string | null; transaction_id: string | null; sender_name: string | null; counter_account: string | null; bank_code: string | null; bank_name: string | null; message: string | null; created_at: string };
-  const r = await db.prepare(SQL_LIST_TRANSACTIONS).bind(since, limit).all<Row>();
+  const r = ownerAppId
+    ? await db.prepare(SQL_LIST_TRANSACTIONS_BY_OWNER).bind(ownerAppId, since, limit).all<Row>()
+    : await db.prepare(SQL_LIST_TRANSACTIONS).bind(since, limit).all<Row>();
   return r.results;
 }
 
 // ---- parse_log list (admin query) ----
 
 const SQL_LIST_PARSE_LOG = `SELECT id, bank_account_id, external_id, error_message, raw_data, created_at FROM parse_log WHERE created_at > datetime(?) ORDER BY id DESC LIMIT ?`;
+const SQL_LIST_PARSE_LOG_BY_OWNER = `SELECT p.id, p.bank_account_id, p.external_id, p.error_message, p.raw_data, p.created_at FROM parse_log p JOIN bank_accounts b ON b.id = p.bank_account_id WHERE b.owner_app_id = ? AND p.created_at > datetime(?) ORDER BY p.id DESC LIMIT ?`;
 
-export async function listParseLog(db: D1Database, since: string, limit: number): Promise<Array<{
+export async function listParseLog(db: D1Database, since: string, limit: number, ownerAppId?: string): Promise<Array<{
   id: number; bank_account_id: number | null; external_id: string | null;
   error_message: string | null; raw_data: string | null; created_at: string;
 }>> {
   type Row = { id: number; bank_account_id: number | null; external_id: string | null; error_message: string | null; raw_data: string | null; created_at: string };
-  const r = await db.prepare(SQL_LIST_PARSE_LOG).bind(since, limit).all<Row>();
+  const r = ownerAppId
+    ? await db.prepare(SQL_LIST_PARSE_LOG_BY_OWNER).bind(ownerAppId, since, limit).all<Row>()
+    : await db.prepare(SQL_LIST_PARSE_LOG).bind(since, limit).all<Row>();
   return r.results;
 }
 
@@ -744,13 +750,16 @@ export async function listUnmatchedMails(db: D1Database, since: string, limit: n
 // ---- webhook_log list (admin query) ----
 
 const SQL_LIST_WEBHOOK_LOG = `SELECT id, delivery_id, consumer_app_id, http_status, error_message, attempt, created_at FROM webhook_log WHERE created_at > datetime(?) ORDER BY id LIMIT ?`;
+const SQL_LIST_WEBHOOK_LOG_BY_CONSUMER = `SELECT id, delivery_id, consumer_app_id, http_status, error_message, attempt, created_at FROM webhook_log WHERE consumer_app_id = ? AND created_at > datetime(?) ORDER BY id LIMIT ?`;
 
-export async function listWebhookLog(db: D1Database, since: string, limit: number): Promise<Array<{
+export async function listWebhookLog(db: D1Database, since: string, limit: number, consumerAppId?: string): Promise<Array<{
   id: number; delivery_id: string; consumer_app_id: string; http_status: number | null;
   error_message: string | null; attempt: number; created_at: string;
 }>> {
   type Row = { id: number; delivery_id: string; consumer_app_id: string; http_status: number | null; error_message: string | null; attempt: number; created_at: string };
-  const r = await db.prepare(SQL_LIST_WEBHOOK_LOG).bind(since, limit).all<Row>();
+  const r = consumerAppId
+    ? await db.prepare(SQL_LIST_WEBHOOK_LOG_BY_CONSUMER).bind(consumerAppId, since, limit).all<Row>()
+    : await db.prepare(SQL_LIST_WEBHOOK_LOG).bind(since, limit).all<Row>();
   return r.results;
 }
 
@@ -937,6 +946,8 @@ const SQL_PRUNE_PARSE_LOG = `DELETE FROM parse_log WHERE created_at < datetime('
 const SQL_PRUNE_WEBHOOK_LOG = `DELETE FROM webhook_log WHERE created_at < datetime('now', '-90 days')`;
 const SQL_PRUNE_EVENT_LOG = `DELETE FROM event_log WHERE created_at < datetime('now', '-30 days')`;
 const SQL_PRUNE_TRANSACTIONS = `DELETE FROM transactions WHERE created_at < datetime('now', '-90 days')`;
+const SQL_PRUNE_IDEMPOTENCY_KEYS = `DELETE FROM idempotency_keys WHERE created_at < datetime('now', '-24 hours')`;
+const SQL_PRUNE_ADMIN_AUDIT_LOG = `DELETE FROM admin_audit_log WHERE created_at < datetime('now', '-90 days')`;
 const SQL_CLEAR_EXPIRED_PREV_SECRETS = `UPDATE webhook_consumers SET prev_secret_cipher = NULL, prev_expires_at = NULL WHERE prev_expires_at < datetime('now')`;
 
 export async function pruneRetention(db: D1Database): Promise<{
@@ -945,11 +956,15 @@ export async function pruneRetention(db: D1Database): Promise<{
   event_log_deleted: number;
   expired_prev_secrets_cleared: number;
   transactions_deleted: number;
+  idempotency_keys_deleted: number;
+  admin_audit_log_deleted: number;
 }> {
   const parseLogResult = await db.prepare(SQL_PRUNE_PARSE_LOG).run();
   const webhookLogResult = await db.prepare(SQL_PRUNE_WEBHOOK_LOG).run();
   const eventLogResult = await db.prepare(SQL_PRUNE_EVENT_LOG).run();
   const txResult = await db.prepare(SQL_PRUNE_TRANSACTIONS).run();
+  const idempotencyResult = await db.prepare(SQL_PRUNE_IDEMPOTENCY_KEYS).run();
+  const auditResult = await db.prepare(SQL_PRUNE_ADMIN_AUDIT_LOG).run();
   const secretsResult = await db.prepare(SQL_CLEAR_EXPIRED_PREV_SECRETS).run();
   return {
     parse_log_deleted: parseLogResult.meta.changes,
@@ -957,5 +972,7 @@ export async function pruneRetention(db: D1Database): Promise<{
     event_log_deleted: eventLogResult.meta.changes,
     expired_prev_secrets_cleared: secretsResult.meta.changes,
     transactions_deleted: txResult.meta.changes,
+    idempotency_keys_deleted: idempotencyResult.meta.changes,
+    admin_audit_log_deleted: auditResult.meta.changes,
   };
 }

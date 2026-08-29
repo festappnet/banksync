@@ -79,7 +79,7 @@ function wrapAsD1(sqlite: Database.Database): D1Database {
   return { prepare } as unknown as D1Database;
 }
 
-const MIGRATIONS = ['0001_schema.sql', '0002_multitenant.sql', '0003_cf_rule_sync.sql', '0004_phase16_hardening.sql', '0005_fio_api_sync.sql', '0006_webhook_delivery_jobs.sql', '0007_webhook_delivery_fencing.sql', '0008_alert_outbox_and_subscription_history.sql', '0009_contract_drop_dlq_archive.sql'];
+const MIGRATIONS = ['0001_schema.sql'];
 
 function applyMigrations(sqlite: Database.Database): void {
   for (const m of MIGRATIONS) {
@@ -153,7 +153,7 @@ describe('assertSchemaVersion', () => {
   it('mismatch error message contains got+expected', async () => {
     const { db, sqlite } = makeTestDbWithSqlite();
     sqlite.prepare(`UPDATE schema_meta SET value = '99' WHERE key = 'version'`).run();
-    await expect(assertSchemaVersion(db)).rejects.toThrow('got 99, expected one of 8, 9');
+    await expect(assertSchemaVersion(db)).rejects.toThrow('got 99, expected one of 10');
   });
 });
 
@@ -529,6 +529,9 @@ describe('writeEvent + pruneRetention', () => {
     sqlite.prepare(`INSERT INTO transactions (bank_account_id, amount_cents, currency, source, date, created_at) VALUES (?, 100, 'CZK', 'email', '2026-05-08T00:00:00Z', datetime('now', '-91 days'))`).run(acctId);
     sqlite.prepare(`INSERT INTO transactions (bank_account_id, amount_cents, currency, source, date, created_at) VALUES (?, 200, 'CZK', 'email', '2026-05-08T00:00:00Z', datetime('now', '-1 days'))`).run(acctId);
 
+    sqlite.prepare(`INSERT INTO idempotency_keys (key_hash, auth_principal, request_path, request_method, response_status, response_body, created_at) VALUES ('old', 'admin', '/x', 'POST', 200, '{}', datetime('now', '-25 hours'))`).run();
+    sqlite.prepare(`INSERT INTO admin_audit_log (auth_principal, http_method, request_path, http_status, created_at) VALUES ('admin', 'POST', '/x', 200, datetime('now', '-91 days'))`).run();
+
     // Expired prev_secret
     sqlite.prepare(`INSERT INTO webhook_consumers (app_id, callback_url, secret_cipher, secret_hash, secret_prefix, prev_secret_cipher, prev_expires_at) VALUES ('app1', 'https://x.com', 'c', 'h', 'p', 'old_c', datetime('now', '-1 hours'))`).run();
 
@@ -537,6 +540,8 @@ describe('writeEvent + pruneRetention', () => {
     expect(counts.event_log_deleted).toBe(1);
     expect(counts.webhook_log_deleted).toBe(1);
     expect(counts.transactions_deleted).toBe(1);
+    expect(counts.idempotency_keys_deleted).toBe(1);
+    expect(counts.admin_audit_log_deleted).toBe(1);
     expect(counts.expired_prev_secrets_cleared).toBe(1);
 
     // Verify non-expired rows survived

@@ -3,6 +3,7 @@ import type { WebhookEnvelope } from './types';
 import { webhookDecrypt } from './crypto';
 import { signWebhook } from './relay';
 import { getConsumerSecretMaterials } from './db';
+import { validateCallbackUrl } from './validation';
 
 /** The port the coordinator uses to actually hit a consumer. Cryptography and
  * the network fetch live here; HTTP-status classification and lifecycle
@@ -20,13 +21,15 @@ export interface DeliverableJob {
 
 export type SenderResult =
   | { kind: 'no_consumer' }
-  | { kind: 'configuration_error'; error: 'consumer_secret_decrypt_failed' }
+  | { kind: 'configuration_error'; error: 'consumer_secret_decrypt_failed' | 'callback_url_not_allowed' }
   | { kind: 'network_error'; error: string; usedPrevSecret: boolean }
   | { kind: 'http'; httpStatus: number; usedPrevSecret: boolean; primaryStatus: number | null };
 
 export interface WebhookSenderEnv {
   DB: D1Database;
   WEBHOOK_KEK: string;
+  ENV?: string;
+  CALLBACK_HOST_ALLOWLIST?: string;
 }
 
 const FETCH_TIMEOUT_MS = 10_000;
@@ -41,6 +44,7 @@ async function postSigned(url: string, envelope: WebhookEnvelope, secret: string
       body: signed.bodyBytes.buffer as ArrayBuffer,
       headers: signed.headers,
       signal: controller.signal,
+      redirect: 'manual',
     });
   } finally {
     clearTimeout(timeoutId);
@@ -53,6 +57,16 @@ export function createWebhookSender(env: WebhookSenderEnv): WebhookSender {
       const consumer = await getConsumerSecretMaterials(env.DB, job.consumer_app_id);
       if (!consumer) return { kind: 'no_consumer' };
 
+      let callbackUrl: string;
+      try {
+        callbackUrl = validateCallbackUrl(consumer.callback_url, {
+          environment: env.ENV,
+          allowlist: env.CALLBACK_HOST_ALLOWLIST,
+        });
+      } catch {
+        return { kind: 'configuration_error', error: 'callback_url_not_allowed' };
+      }
+
       let primarySecret: string;
       try {
         primarySecret = await webhookDecrypt(consumer.primary_cipher, env.WEBHOOK_KEK);
@@ -63,7 +77,7 @@ export function createWebhookSender(env: WebhookSenderEnv): WebhookSender {
       }
       let primary: Response;
       try {
-        primary = await postSigned(consumer.callback_url, job.envelope, primarySecret);
+        primary = await postSigned(callbackUrl, job.envelope, primarySecret);
       } catch (err) {
         return { kind: 'network_error', error: String(err), usedPrevSecret: false };
       }
@@ -78,7 +92,7 @@ export function createWebhookSender(env: WebhookSenderEnv): WebhookSender {
         }
         let prev: Response;
         try {
-          prev = await postSigned(consumer.callback_url, job.envelope, prevSecret);
+          prev = await postSigned(callbackUrl, job.envelope, prevSecret);
         } catch (err) {
           return { kind: 'network_error', error: String(err), usedPrevSecret: true };
         }
