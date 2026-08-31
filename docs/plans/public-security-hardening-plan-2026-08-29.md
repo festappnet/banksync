@@ -1,7 +1,7 @@
 # Secure BankSync public release
 
 Date: 2026-08-29  
-Status: Production security cutover complete except genuine-bank email proof and npm publication
+Status: Complete; protected npm release and production verification finished 2026-08-31
 Verification: release
 
 ## Outcome
@@ -115,15 +115,16 @@ the attacker's consumer to another tenant's account.
   ESM/CommonJS build and load smoke,
   production dependency audit, Wrangler Worker dry-run, and both fresh and
   recorded-0001–0009-to-0010 disposable Wrangler D1 migration flows.
-- Two independent `npm pack --ignore-scripts` runs produced byte-identical
-  `festapp-banksync-0.1.2.tgz` with SHA-256
-  `078dcd186140a884c7739cccc306e334b8b490e1079b7ff2471e274b4f7d824b`
-  from runtime commit `14d22b74d5a5eecc335db3a924324b3ff04cb06e`.
+- Protected release `v0.1.4` produced the canonical
+  `festapp-banksync-0.1.4.tgz` with SHA-256
+  `dd2edf7efdef52f289b7597ad8634bd684df3dfba5eca537eb249f1ac155d031`
+  from commit `6cdf5b9b2ee427d4acf908f0da814d1ef234e65b`.
   It contains only `0001_schema.sql` and `0010_security_hardening.sql` under
   `migrations/`, contains both module-system entry points, and has no weak
-  verifier export.
-- Production Worker version `0ede8e5c-b77f-4de1-a84c-8da21666fe1e` runs the
-  pinned runtime commit. D1 is at schema version 10; credential-shaped and all
+  verifier export. The npm and GitHub Release tarballs are byte-identical and
+  carry build provenance and an SBOM.
+- Production Worker version `3b4d701c-9e95-4e1b-8758-3c1c18ef13c5` runs the
+  registry package. D1 is at schema version 10; credential-shaped and all
   legacy idempotency rows are absent. Anonymous `/status` and `/health/deep`
   return 401 while `/health` returns only `{"ok":true}`. A foreign-account
   subscription attempt returned 403 and left D1 unchanged.
@@ -143,17 +144,16 @@ the attacker's consumer to another tenant's account.
   dependency review, secrets, and CodeQL checks are enforced. Secret scanning,
   push protection, Dependabot security updates, and private vulnerability
   reporting are enabled. All workflow actions are pinned to full commit SHAs.
-- `@festapp/banksync` is the canonical npm identity. A bootstrap package was
-  fully unpublished during namespace setup, so npm enforces its documented
-  24-hour same-name cooldown; publication cannot resume before approximately
-  2026-08-30 15:48:23 CEST. No stable npm version or `v0.1.2` tag exists yet.
+- `@festapp/banksync@0.1.4` is public under the `latest` dist-tag. GitHub OIDC
+  trusted publishing is bound to `festappnet/banksync`, `release.yml`, and the
+  `npm` environment; the temporary bootstrap dist-tag was removed.
 - Production has `BACKUP_ENCRYPTION_KEY_V1`; the same restore key is held
   independently outside Cloudflare. A paid SES bootstrap canary established
   `mx.cloudflare.net` as the single non-ambiguous Cloudflare authserv-id; it is
   configured, deep health is green, and a second controlled message was
-  rejected with `email_identity_mismatch` without creating a transaction. The
-  remaining accepted proof must come from a genuine signed bank notification,
-  not a simulated non-bank sender.
+  rejected with `email_identity_mismatch` without creating a transaction. A
+  genuine bank email then created a production transaction on
+  `2026-08-31 08:41:06`, completing the accepted signed-bank proof.
 - The only remaining R2 object is the encrypted, independently restored
   `banksync-20260829.sql.enc` (SHA-256
   `ed2cfa38ac0ac0ffeb8af4df32879d00bf5ffef083c63b49bd46d8e98b60005e`).
@@ -700,7 +700,7 @@ verification exports, plaintext backup output, or old R2 objects.
 - [x] Wave 0 containment is running in production.
 - [x] Every tenant path authorizes from stored ownership and all foreign-ID
       negative tests leave D1 unchanged.
-- [ ] Email identity uses only Cloudflare-owned evidence and spoof fixtures fail.
+- [x] Email identity uses only Cloudflare-owned evidence and spoof fixtures fail.
 - [x] Public HTTP exposes only coarse health and cannot trigger active probes.
 - [x] Credential responses never enter idempotency or backup persistence.
 - [x] Backup objects are application-layer encrypted and restore is proven.
@@ -710,10 +710,10 @@ verification exports, plaintext backup output, or old R2 objects.
       artifacts are absent from the package.
 - [x] No BankSync migration was moved into or confused with Mendelio billing.
 - [x] GitHub main/tags, CI actions, scanning, and release workflow are hardened.
-- [ ] npm authentication/trusted publishing works and published bytes match the
+- [x] npm authentication/trusted publishing works and published bytes match the
       tested GitHub artifact and checksum.
 - [x] Mendelio lockfile and production Worker run that exact version.
-- [ ] Full release verification and production smoke pass after the final deploy.
+- [x] Full release verification and production smoke pass after the final deploy.
 
 ## Residual risks
 
