@@ -147,6 +147,8 @@ the attacker's consumer to another tenant's account.
 - `@festapp/banksync@0.1.4` is public under the `latest` dist-tag. GitHub OIDC
   trusted publishing is bound to `festappnet/banksync`, `release.yml`, and the
   `npm` environment; the temporary bootstrap dist-tag was removed.
+- Documentation-only follow-up `v0.1.5` republishes the unchanged runtime with
+  the canonical interface-first README embedded in the npm package.
 - Production has `BACKUP_ENCRYPTION_KEY_V1`; the same restore key is held
   independently outside Cloudflare. A paid SES bootstrap canary established
   `mx.cloudflare.net` as the single non-ambiguous Cloudflare authserv-id; it is
