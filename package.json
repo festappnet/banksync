@@ -44,8 +44,8 @@
     "prepack": "pnpm build"
   },
   "dependencies": {
-    "postal-mime": "^2.7.5",
-    "ulid": "^2.3.0",
+    "postal-mime": "^3.0.0",
+    "ulid": "^3.0.2",
     "valibot": "^1.2.0"
   },
   "devDependencies": {
