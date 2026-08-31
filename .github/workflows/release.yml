@@ -66,6 +66,7 @@ jobs:
         id: pack
         shell: bash
         run: |
+          mkdir -p release
           TARBALL=$(npm pack --ignore-scripts --pack-destination release --json | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d)[0].filename))")
           echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
           test "$(tar -tzf "release/$TARBALL" | grep '^package/migrations/' | sort | tr '\n' ' ')" = "package/migrations/0001_schema.sql package/migrations/0010_security_hardening.sql "
