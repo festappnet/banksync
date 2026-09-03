@@ -1356,6 +1356,33 @@ describe('scheduled() retention cron', () => {
     expect(account.api_last_success_at).not.toBeNull();
   });
 
+  it('keeps minutely polling but runs durable reconciliation only every five minutes', async () => {
+    const { db, sqlite } = makeTestDb();
+    const queueSend = vi.fn().mockResolvedValue(undefined);
+    const env = makeEnv(db, queueSend);
+    const { accountId, appId } = await seedFullSetup(db, sqlite);
+    sqlite.prepare(
+      `INSERT INTO transactions (bank_account_id, amount_cents, currency, source, date) VALUES (?, 100, 'CZK', 'email', datetime('now'))`
+    ).run(accountId);
+
+    const offCycleEvent = {
+      cron: '* * * * *',
+      scheduledTime: Date.UTC(2026, 8, 3, 12, 1),
+    } as unknown as Parameters<NonNullable<typeof worker.scheduled>>[0];
+    await worker.scheduled!(offCycleEvent, env, fakeCtx);
+
+    expect((sqlite.prepare(`SELECT COUNT(*) AS n FROM webhook_delivery_jobs`).get() as { n: number }).n).toBe(0);
+
+    const reconciliationEvent = {
+      cron: '* * * * *',
+      scheduledTime: Date.UTC(2026, 8, 3, 12, 5),
+    } as unknown as Parameters<NonNullable<typeof worker.scheduled>>[0];
+    await worker.scheduled!(reconciliationEvent, env, fakeCtx);
+
+    expect(sqlite.prepare(`SELECT consumer_app_id FROM webhook_delivery_jobs`).get()).toEqual({ consumer_app_id: appId });
+    expect(queueSend).toHaveBeenCalledOnce();
+  });
+
   it('api sync queue tick polls due accounts and reschedules next tick after 30 seconds', async () => {
     const { db, sqlite } = makeTestDb();
     const apiQueueSend = vi.fn().mockResolvedValue(undefined);

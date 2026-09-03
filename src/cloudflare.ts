@@ -341,6 +341,7 @@ interface BankApiSyncResult {
 const API_POLL_CRON = '* * * * *';
 const MAINTENANCE_CRON = '15 3 * * *';
 const API_SYNC_LEASE_S = 30;
+const RECONCILIATION_INTERVAL_MINUTES = 5;
 
 function scheduledCron(event: ScheduledEvent): string | null {
   const cron = (event as { cron?: unknown }).cron;
@@ -355,6 +356,15 @@ function shouldRunApiPolling(event: ScheduledEvent): boolean {
 function shouldRunMaintenance(event: ScheduledEvent): boolean {
   const cron = scheduledCron(event);
   return cron === null || cron === MAINTENANCE_CRON;
+}
+
+function shouldRunReconciliation(event: ScheduledEvent): boolean {
+  const cron = scheduledCron(event);
+  if (cron === null) return true;
+  if (cron !== API_POLL_CRON) return false;
+  const scheduledTime = (event as { scheduledTime?: unknown }).scheduledTime;
+  if (typeof scheduledTime !== 'number' || !Number.isFinite(scheduledTime)) return true;
+  return Math.floor(scheduledTime / 60_000) % RECONCILIATION_INTERVAL_MINUTES === 0;
 }
 
 function apiSyncDelayS(env: Env): number {
@@ -1423,6 +1433,7 @@ export default {
     await assertSchemaVersion(env.DB);
     const runPolling = shouldRunApiPolling(event);
     const runMaintenance = shouldRunMaintenance(event);
+    const runReconciliation = runPolling && shouldRunReconciliation(event);
 
     if (runMaintenance) {
       try {
@@ -1451,9 +1462,12 @@ export default {
         logError('outbox_process_failed', err, {});
       }
 
+    }
+
+    if (runReconciliation) {
       // Durable webhook healing runs independently of a new bank event. It
       // derives jobs first, so a transaction committed before a failed
-      // queue.send is recovered on the next minute tick.
+      // queue.send is recovered within the bounded reconciliation interval.
       try {
         const swept = await createWebhookDeliveryCoordinator(env).sweep();
         if (swept.created > 0 || swept.considered > 0) {
@@ -1488,7 +1502,7 @@ export default {
     }
 
     // Alerter tick
-    if (runPolling && env.ALERT_WEBHOOK_URL) {
+    if (runReconciliation && env.ALERT_WEBHOOK_URL) {
       try {
         const alert = await runAlerterTick(env.DB, {
           webhookUrl: env.ALERT_WEBHOOK_URL,
@@ -1505,7 +1519,7 @@ export default {
     // Per-job delivery alert outbox: detect stalled incidents, then drain due
     // alerts. Each incident is durable and per-job deduplicated — no global
     // debounce can hide a new terminal payment incident.
-    if (runPolling && env.ALERT_WEBHOOK_URL) {
+    if (runReconciliation && env.ALERT_WEBHOOK_URL) {
       try {
         const service = env.BANKSYNC_DOMAIN ?? 'banksync';
         await detectStalledIncidents(env.DB, service);
