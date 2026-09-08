@@ -216,6 +216,13 @@ pnpm pack --dry-run
 builds, and package-export verification. Provider-live tests are intentionally
 outside the default suite and must never use production bank credentials.
 
+Dependabot minor and patch updates for development dependencies and GitHub
+Actions automatically merge after all required checks pass on an up-to-date
+branch. Major updates and production dependency updates require manual review.
+TypeScript major updates are held back until the declaration build supports
+the newer compiler API. The auto-merge workflow reads verified Dependabot
+metadata only; it never checks out or runs pull-request code.
+
 Stable releases are created from protected `v*` tags by GitHub Actions, publish
 to npm through OIDC trusted publishing, and attach the exact same tarball,
 checksum, provenance and SBOM to the GitHub Release.

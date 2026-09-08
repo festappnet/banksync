@@ -5,11 +5,17 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 2
+    # tsup's declaration bundler uses the TypeScript 5 compiler API.
+    # Revisit this together with a declaration-build tooling migration.
+    ignore:
+      - dependency-name: typescript
+        update-types: [version-update:semver-major]
     groups:
       production-dependencies:
         dependency-type: production
       development-dependencies:
         dependency-type: development
+        update-types: [minor, patch]
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -17,5 +23,6 @@ updates:
     open-pull-requests-limit: 1
     groups:
       github-actions:
+        update-types: [minor, patch]
         patterns:
           - '*'
