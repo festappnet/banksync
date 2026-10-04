@@ -12,7 +12,7 @@ import {
 } from './webhookDelivery';
 import type { WebhookQueueMessage } from './queue';
 
-const MIGRATIONS = ['0001_schema.sql'];
+const MIGRATIONS = ['0001_schema.sql','0011_complete_bank_facts.sql'];
 
 /** In-memory D1 shim over better-sqlite3. `failOn` injects a deterministic
  * post-send / storage failure for crash-boundary tests. */

@@ -59,8 +59,8 @@ jobs:
           sed "s#migrations_dir = \"migrations\"#migrations_dir = \"$GITHUB_WORKSPACE/test-fixtures/migrations-v9\"#" wrangler.example.toml > /tmp/banksync-v9.toml
           pnpm wrangler d1 migrations apply DB --local --persist-to /tmp/banksync-d1-upgrade --config /tmp/banksync-v9.toml
           pnpm wrangler d1 migrations apply DB --local --persist-to /tmp/banksync-d1-upgrade --config wrangler.example.toml
-          pnpm wrangler d1 execute DB --local --persist-to /tmp/banksync-d1-fresh --config wrangler.example.toml --command "SELECT value FROM schema_meta WHERE key='version'" | grep -q '10'
-          pnpm wrangler d1 execute DB --local --persist-to /tmp/banksync-d1-upgrade --config wrangler.example.toml --command "SELECT value FROM schema_meta WHERE key='version'" | grep -q '10'
+          pnpm wrangler d1 execute DB --local --persist-to /tmp/banksync-d1-fresh --config wrangler.example.toml --command "SELECT value FROM schema_meta WHERE key='version'" | grep -q '11'
+          pnpm wrangler d1 execute DB --local --persist-to /tmp/banksync-d1-upgrade --config wrangler.example.toml --command "SELECT value FROM schema_meta WHERE key='version'" | grep -q '11'
       - run: pnpm wrangler deploy --config wrangler.example.toml --dry-run --outdir /tmp/banksync-worker-dry-run
       - name: Build the release tarball once
         id: pack
@@ -69,7 +69,7 @@ jobs:
           mkdir -p release
           TARBALL=$(npm pack --ignore-scripts --pack-destination release --json | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d)[0].filename))")
           echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
-          test "$(tar -tzf "release/$TARBALL" | grep '^package/migrations/' | sort | tr '\n' ' ')" = "package/migrations/0001_schema.sql package/migrations/0010_security_hardening.sql "
+          test "$(tar -tzf "release/$TARBALL" | grep '^package/migrations/' | sort | tr '\n' ' ')" = "package/migrations/0001_schema.sql package/migrations/0010_security_hardening.sql package/migrations/0011_complete_bank_facts.sql "
           if tar -xOf "release/$TARBALL" package/dist/index.js | grep -q 'verifyWebhookSignature'; then exit 1; fi
           sha256sum "release/$TARBALL" | tee "release/$TARBALL.sha256"
       - uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2

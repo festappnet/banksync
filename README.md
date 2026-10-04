@@ -23,8 +23,8 @@ receive bank activity → authenticate → normalize → deduplicate → deliver
 | | |
 |---|---|
 | **Inputs** | Fio Bank email, Fio API, Air Bank email |
-| **Output** | Signed `transaction.received` webhook, version `1` |
-| **Runtime** | Cloudflare Workers, Email Routing, D1 and Queues; optional R2 |
+| **Output** | Signed `transaction.received` webhook, consumer-selected version `1` or `2` |
+| **Runtime** | Cloudflare Workers, Email Routing, D1 and Queues; R2 required for durable email recovery |
 | **Package** | Runtime-neutral helpers plus a separate Cloudflare Worker export |
 | **Safety model** | Tenant ownership, authenticated email identity, durable idempotency and exact-host callback policy |
 
@@ -109,7 +109,7 @@ export type { Env } from "@festapp/banksync/cloudflare";
 
 - Node.js 20 or newer and pnpm;
 - a Cloudflare account with Workers, D1, Queues and Email Routing;
-- an R2 bucket only if encrypted backups are enabled;
+- an R2 bucket for authenticated email recovery or encrypted backups;
 - exact callback hostnames for every intended webhook consumer.
 
 ### Setup
@@ -118,9 +118,9 @@ export type { Env } from "@festapp/banksync/cloudflare";
 2. Copy [`wrangler.example.toml`](wrangler.example.toml) to `wrangler.toml` and
    replace every resource placeholder.
 3. Create the D1 database and queues named by the configuration.
-4. For a fresh database, apply `migrations/0001_schema.sql`. For a production
-   database whose recorded history ends at `0009`, apply only
-   `migrations/0010_security_hardening.sql` through a scoped, reviewed migration.
+4. Apply the baseline and forward migrations on a fresh database. An existing
+   version-10 database advances only through `0011_complete_bank_facts.sql`.
+   Preserve recorded migration history and use a scoped reviewed rollout.
 5. Configure `ADMIN_SECRET`, `WEBHOOK_KEK`, `ENCRYPTION_KEY_V1`, and—when R2
    backups are enabled—the selected `BACKUP_ENCRYPTION_KEY_Vn` with
    `pnpm wrangler secret put <NAME>`.
@@ -142,8 +142,8 @@ keys outside R2 and prove restore before rotation. Never commit `wrangler.toml`,
 
 Fresh databases use the single canonical baseline `0001_schema.sql`, which
 creates schema version 10. Existing databases retain their recorded `0001`–`0009`
-history and advance through `0010_security_hardening.sql`. Future migrations
-must start at `0011`; never renumber or replace the baseline.
+history and advance through `0010_security_hardening.sql`, then
+`0011_complete_bank_facts.sql` to version 11. Never renumber or replace the baseline.
 
 BankSync D1 is intentionally independent of consumer billing databases.
 BankSync emits authenticated transaction facts. Each consumer owns settlement,
@@ -230,3 +230,52 @@ checksum, provenance and SBOM to the GitHub Release.
 ## License
 
 [MIT](LICENSE) © Festapp
+
+
+## Version 0.2 integration contract
+
+Existing consumers default to event version 1. Register a new prepared consumer
+with `event_version: "2"`; its receiver calls `verifyWebhook({...args,
+eventVersion: "2"})`. Receipt version remains 1. V1 receives only incoming facts
+in its original shape; archived delivery payloads are immutable.
+
+V2 adds `payer_reference`, `raw_vs`, signed `amount_cents`, `direction`,
+`identity_kind` and `identity_provenance`. Decimal amounts and numeric bank IDs
+are range-checked without rounding. Similar VS/amount/date never deduplicates
+real movements. Transport IDs are account-scoped. Fio `ID pokynu` is a command,
+not a movement; unproven email IDs are observations. Financial consumers must
+quarantine observations until their own authorized reconciliation establishes
+bank identity. `both` is unavailable to v2 pending provider correlation proof.
+
+On schema 11, all Fio manual/queue/cron imports share physical-account and full
+credential-hash leases. Imports use bounded `periods` reads, an encrypted durable
+batch, and a checkpoint committed only after every row succeeds. They never
+advance `/last`. The bootstrap covers 90 calendar dates; subsequent pulls overlap
+three days. Older unresolved windows require operator/bank authorization rather
+than silent truncation. Receiving-account and statement currency mismatches leave
+the batch open.
+
+A new connection can be created with `ingest_enabled:false`. Persist mapping and
+verify its owner subscription before `PUT /bank-accounts/:id/ingest-state` with
+`{enabled:true}`. Account identity cannot change under existing movements.
+`GET .../ingest-state` provides the full credential digest for timeout recovery,
+never the credential. Creation idempotency receipts are retained permanently.
+
+New v2 email connections require `AUTHENTICATED_EMAIL_SPOOL=on` and `BACKUPS`.
+Strict bank authentication precedes encrypted R2 persistence; persistence precedes
+D1 account lookup. Original MIME bytes and trusted envelope evidence survive D1
+outages. Scheduled cursor recovery visits failed messages without starving newer
+ones. Authenticated parse failures stay quarantined. No active legacy recipient
+migration is implied. New provider email automation requires real sanitized bank
+fixtures and a genuine authenticated ingress canary.
+
+`GET /bank-accounts/:id/transaction-export` returns complete account facts with
+`cursor`, fixed `high_water` and `complete`; persist both coordinates.
+`POST /admin/cutover-reconcile` is admin-only, requires a manifest SHA-256 and
+an exact owner consumer/account/ID window, creates only missing v2 intents, and
+never rewrites an archived payload or globally changes subscription intervals.
+Unresolved or quarantined facts are retained beyond the usual 90-day cleanup.
+Publishing this package does not deploy the shared Worker, mutate D1, enable bank
+polling, or authorize replay of another consumer's history.
+
+Canonical v2 transactions preserve bank-provided VS and payer reference without inferring an order identifier. Each consumer (Festapp, Mendelio, or another application) owns payment matching and business rules. The existing v1 RF-to-VS projection remains only as an explicit backwards-compatible adapter.

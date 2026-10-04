@@ -85,13 +85,18 @@ function newDispatchToken(): string {
  * sweep cannot create a second delivery lineage (UNIQUE(transaction, consumer,
  * event_kind)).
  */
-export async function ensureDeliveryJobs(db: D1Database, transactionId?: number): Promise<number> {
+export async function ensureDeliveryJobs(db: D1Database, transactionId?: number, cutover?: {accountId:number; consumerAppId:string; fromId:number; throughId:number}): Promise<number> {
+  const schema = await db.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
+  const expanded = schema?.value === '11';
+  if(cutover && !expanded) throw new Error('cutover_requires_schema11');
   const candidates = await db.prepare(`
-    SELECT t.*, b.pairing_code, s.consumer_app_id
+    SELECT t.*, b.pairing_code, s.consumer_app_id${expanded ? ', c.event_version' : ''}
     FROM transactions t
     JOIN bank_accounts b ON b.id = t.bank_account_id
     JOIN webhook_subscriptions s ON s.bank_account_id = t.bank_account_id
+    ${expanded ? 'JOIN webhook_consumers c ON c.app_id = s.consumer_app_id' : ''}
     WHERE (? IS NULL OR t.id = ?)
+      AND ${expanded ? "(c.event_version='2' OR t.amount_cents > 0)" : 't.amount_cents > 0'}
       AND NOT EXISTS (
         SELECT 1 FROM webhook_delivery_jobs j
         WHERE j.transaction_id = t.id AND j.consumer_app_id = s.consumer_app_id
@@ -100,20 +105,22 @@ export async function ensureDeliveryJobs(db: D1Database, transactionId?: number)
       -- Intent is decided by the subscription interval at ingest, not by the
       -- current active-subscription view. Exact UTC datetime (not julianday) so
       -- a same-second create/delete/transaction is deterministic.
-      AND datetime(s.created_at) <= datetime(t.created_at)
-      AND (s.deleted_at IS NULL OR datetime(t.created_at) < datetime(s.deleted_at))
-  `).bind(transactionId ?? null, transactionId ?? null).all<(Transaction & {
+      ${cutover ? "AND t.bank_account_id=? AND s.consumer_app_id=? AND t.id>=? AND t.id<=? AND s.deleted_at IS NULL AND c.event_version='2'" : "AND datetime(s.created_at) <= datetime(t.created_at) AND (s.deleted_at IS NULL OR datetime(t.created_at) < datetime(s.deleted_at))"}
+  `).bind(transactionId ?? null, transactionId ?? null, ...(cutover ? [cutover.accountId,cutover.consumerAppId,cutover.fromId,cutover.throughId] : [])).all<(Transaction & {
     pairing_code: string;
     consumer_app_id: string;
+    event_version?: '1' | '2';
   })>();
 
   let created = 0;
   for (const row of candidates.results) {
+    const { pairing_code, consumer_app_id, event_version, created_at: _createdAt, ...transaction } = row as typeof row & {created_at?: string};
     const deliveryId = ulid();
     const envelope = buildWebhookEnvelope({
       delivery_id: deliveryId,
       pairing_code: row.pairing_code,
-      transaction: row,
+      transaction,
+      event_version: row.event_version ?? '1',
     });
     const payload = JSON.stringify(envelope);
     const result = await db.prepare(`

@@ -1,5 +1,5 @@
 import type { Transaction } from './types';
-import { normalizeCurrency, toCents } from './normalize';
+import { normalizeCurrency, decimalToCents } from './normalize';
 
 const FIO_BASE = 'https://fioapi.fio.cz/v1/rest';
 
@@ -50,7 +50,7 @@ export interface FioProxyConfig {
   secret: string;
 }
 
-type FioOp = 'transactions' | 'set-last-date';
+type FioOp = 'transactions' | 'set-last-date' | 'periods';
 
 async function fioRequest(
   op: FioOp,
@@ -58,15 +58,17 @@ async function fioRequest(
   directUrl: string,
   proxy: FioProxyConfig | undefined,
   date?: string,
+  toDate?: string,
 ): Promise<Response> {
   if (proxy?.url && proxy.secret) {
     return fetch(proxy.url, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-fio-proxy-secret': proxy.secret },
-      body: JSON.stringify(date === undefined ? { op, token } : { op, token, date }),
+      body: JSON.stringify(date === undefined ? { op, token } : { op, token, date, ...(toDate ? { toDate } : {}) }),
+      signal: AbortSignal.timeout(20_000),
     });
   }
-  return fetch(directUrl);
+  return fetch(directUrl, {signal: AbortSignal.timeout(20_000)});
 }
 
 function retryAfterSeconds(headers: Headers): number | null {
@@ -77,7 +79,7 @@ function retryAfterSeconds(headers: Headers): number | null {
 }
 
 async function ensureFioResponse(res: Response): Promise<void> {
-  if (res.status === 429) {
+  if (res.status === 429 || res.status === 409) {
     throw new FioRateLimited(res.status, retryAfterSeconds(res.headers));
   }
   if (res.status >= 500) {
@@ -113,6 +115,7 @@ export async function setFioPointer(token: string, yyyyMmDd: string, proxy?: Fio
 function column(raw: FioTransaction, idx: number): string | null {
   const value = raw[`column${idx}`]?.value;
   if (value === null || value === undefined) return null;
+  if (typeof value === 'number' && (idx === 22 || idx === 17) && !Number.isSafeInteger(value)) throw new Error('unsafe_fio_identity');
   const s = String(value).trim();
   return s.length > 0 ? s : null;
 }
@@ -131,7 +134,7 @@ function parseOffsetMinutes(raw: string): number | null {
 }
 
 function parseFioDate(raw: string | null): { date: string; date_offset_min: number | null } {
-  if (!raw) return { date: new Date().toISOString(), date_offset_min: null };
+  if (!raw) throw new Error('missing_fio_date');
 
   const isoDateOnly = raw.match(/^(\d{4}-\d{2}-\d{2})(?:[+-]\d{2}:?\d{2})?$/);
   if (isoDateOnly) {
@@ -161,14 +164,19 @@ function parseFioDate(raw: string | null): { date: string; date_offset_min: numb
 }
 
 export function mapFioTransaction(raw: FioTransaction): Omit<Transaction, 'id' | 'bank_account_id'> | null {
-  const amount = parseAmount(column(raw, 1));
-  if (!(amount > 0)) return null;
+  const rawAmount = column(raw, 1);
+  if (rawAmount === null) throw new Error('missing_fio_amount');
 
   const currency = normalizeCurrency(column(raw, 14) ?? '');
   const { date, date_offset_min } = parseFioDate(column(raw, 0));
 
   return {
-    amount_cents: toCents(amount, currency),
+    amount_cents: decimalToCents(rawAmount, currency),
+    payer_reference: column(raw, 27),
+    raw_vs: column(raw, 5),
+    direction: decimalToCents(rawAmount, currency) > 0 ? 'incoming' : decimalToCents(rawAmount, currency) < 0 ? 'outgoing' : 'zero',
+    identity_kind: column(raw, 22) ? 'movement' : 'observation',
+    identity_provenance: 'fio_api_column22',
     currency,
     counter_account: column(raw, 2),
     bank_code: column(raw, 3),
@@ -189,4 +197,19 @@ export function mapFioTransaction(raw: FioTransaction): Omit<Transaction, 'id' |
     transaction_id: column(raw, 22),
     external_id: null,
   };
+}
+
+/** A bounded read that does not advance the bank's last-movement cursor. */
+export async function fetchFioStatement(token: string, from: string, to: string, proxy?: FioProxyConfig): Promise<{
+  info: Record<string, unknown>; transactions: FioTransaction[];
+}> {
+  for (const date of [from,to]) if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date))) throw new Error('invalid_statement_window');
+  if (from > to || Date.parse(to)-Date.parse(from) > 90*86400000) throw new Error('unbounded_statement_window');
+  const response = await fioRequest('periods',token,`${endpoint('periods',token)}/${from}/${to}/transactions.json`,proxy,from,to);
+  await ensureFioResponse(response);
+  const document = await response.json() as {accountStatement?: {info?:Record<string,unknown>; transactionList?:{transaction?:FioTransaction[]|FioTransaction}}};
+  const statement = document.accountStatement;
+  if (!statement?.info) throw new Error('missing_statement_info');
+  const rows = statement.transactionList?.transaction ?? [];
+  return {info:statement.info,transactions:Array.isArray(rows)?rows:[rows]};
 }

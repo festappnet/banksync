@@ -38,6 +38,7 @@ export function parseBody<TSchema extends v.GenericSchema>(
 // ============================================================================
 
 export const CreateBankAccountSchema = v.object({
+  ingest_enabled: v.optional(v.boolean()),
   account_number: v.pipe(v.string(), v.minLength(3), v.maxLength(64)),
   account_type: v.optional(v.picklist(['FIO', 'AIRBANK'])),
   ingest_mode: v.optional(v.picklist(['email', 'api', 'both'])),
@@ -97,6 +98,7 @@ export type UpdateFioTokenInput = v.InferOutput<typeof UpdateFioTokenSchema>;
 // ============================================================================
 
 export const CreateConsumerSchema = v.object({
+  event_version: v.optional(v.picklist(['1', '2'])),
   app_id: v.pipe(v.string(), v.regex(/^[a-z0-9][a-z0-9-_]{1,63}$/)),
   callback_url: v.pipe(v.string(), v.url(), v.regex(/^https:\/\//)),
 });

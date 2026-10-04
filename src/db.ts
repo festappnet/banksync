@@ -9,7 +9,7 @@ import { resolveVariableSymbol } from './referenceCandidates';
 // (8) and the contract-cleanup schema (9). Two adjacent versions so neither
 // deploy order (code-before-migration or migration-before-code) causes a global
 // 503. Older expand versions (6, 7) are gone from every environment.
-const SUPPORTED_SCHEMA_VERSIONS = ['10'] as const;
+const SUPPORTED_SCHEMA_VERSIONS = ['10', '11'] as const;
 type SupportedSchemaVersion = (typeof SUPPORTED_SCHEMA_VERSIONS)[number];
 
 const _checkedDbs = new Set<D1Database>();
@@ -369,12 +369,14 @@ export async function createConsumer(db: D1Database, args: {
   secret_cipher: string;
   secret_hash: string;
   secret_prefix: string;
+  event_version?: '1' | '2';
 }): Promise<WebhookConsumer> {
   const row = await db
     .prepare(SQL_CREATE_CONSUMER)
     .bind(args.app_id, args.callback_url, args.secret_cipher, args.secret_hash, args.secret_prefix)
     .first<WebhookConsumer>();
   if (!row) throw new Error('createConsumer: no row returned');
+  if (args.event_version === '2') await db.prepare("UPDATE webhook_consumers SET event_version='2' WHERE id=?").bind(row.id).run();
   return row;
 }
 
@@ -493,58 +495,36 @@ INSERT OR IGNORE INTO transactions (
 
 const SQL_SELECT_TRANSACTION_BY_ID = `SELECT id, bank_account_id, amount_cents, currency, counter_account, bank_code, bank_name, vs, ks, ss, message, sender_name, user_identification, transaction_type, performed_by, comment, command_id, source, date, date_offset_min, transaction_id, external_id FROM transactions WHERE id = ?`;
 
-const SQL_FIND_DUPLICATE_EXT = `SELECT id FROM transactions WHERE external_id = ? AND external_id IS NOT NULL LIMIT 1`;
-const SQL_FIND_DUPLICATE_FIO = `SELECT id FROM transactions WHERE bank_account_id = ? AND transaction_id = ? AND transaction_id IS NOT NULL LIMIT 1`;
-const SQL_FIND_DUPLICATE_FUZZY = `
-SELECT id
-FROM transactions
-WHERE bank_account_id = ?
-  AND vs = ?
-  AND amount_cents = ?
-  AND currency = ?
-  AND substr(date, 1, 10) BETWEEN date(?, '-3 days') AND date(?, '+3 days')
-LIMIT 1
-`;
-
-function fuzzyDateDay(date: string): string | null {
-  return /^\d{4}-\d{2}-\d{2}/.test(date) ? date.slice(0, 10) : null;
-}
-
-async function findFuzzyDuplicate(db: D1Database, bankAccountId: number, p: Omit<Transaction, 'id' | 'bank_account_id'>): Promise<boolean> {
-  if (!p.vs) return false;
-  const dateDay = fuzzyDateDay(p.date);
-  if (!dateDay) return false;
-  const hit = await db
-    .prepare(SQL_FIND_DUPLICATE_FUZZY)
-    .bind(bankAccountId, p.vs, p.amount_cents, p.currency, dateDay, dateDay)
-    .first<{ id: number }>();
-  return hit !== null;
-}
-
+const SQL_FIND_DUPLICATE_EXT = `SELECT id FROM transactions WHERE bank_account_id = ? AND external_id = ? AND external_id IS NOT NULL LIMIT 1`;
+const SQL_FIND_DUPLICATE_FIO = `SELECT * FROM transactions WHERE bank_account_id = ? AND transaction_id = ? AND transaction_id IS NOT NULL AND source='fio_api' LIMIT 1`;
 export async function insertTransaction(db: D1Database, args: {
   bank_account_id: number;
   payload: Omit<Transaction, 'id' | 'bank_account_id'>;
 }): Promise<InsertResult> {
+  const schema = await db.prepare(`SELECT value FROM schema_meta WHERE key='version'`).first<{value: string}>();
+  const v2 = schema?.value === '11';
   const p = {
     ...args.payload,
-    vs: resolveVariableSymbol(args.payload),
+    vs: v2 ? (args.payload.raw_vs ?? args.payload.vs ?? null) : resolveVariableSymbol(args.payload),
   };
 
-  if (p.transaction_id != null) {
+  if (p.transaction_id != null && p.source === 'fio_api') {
     const hit = await db.prepare(SQL_FIND_DUPLICATE_FIO).bind(args.bank_account_id, p.transaction_id).first<{ id: number }>();
-    if (hit) return { status: 'skipped', reason: 'duplicate_transaction_id' };
+    if (hit) {
+        const facts = hit as unknown as Transaction;
+        if (facts.amount_cents !== p.amount_cents || facts.currency !== p.currency || facts.date.slice(0,10) !== p.date.slice(0,10)
+          || (facts.identity_kind === 'movement' && (facts.raw_vs !== (p.raw_vs ?? args.payload.vs ?? null) || facts.payer_reference !== (p.payer_reference ?? null)))) throw new Error('bank_movement_fact_conflict');
+        return { status: 'skipped', reason: 'duplicate_transaction_id' };
+      }
   }
   if (p.external_id != null) {
-    const hit = await db.prepare(SQL_FIND_DUPLICATE_EXT).bind(p.external_id).first<{ id: number }>();
+    const hit = await db.prepare(SQL_FIND_DUPLICATE_EXT).bind(args.bank_account_id, p.external_id).first<{ id: number }>();
     if (hit) return { status: 'skipped', reason: 'duplicate_external_id' };
   }
-  if (await findFuzzyDuplicate(db, args.bank_account_id, p)) {
-    return { status: 'skipped', reason: 'fuzzy_duplicate' };
-  }
 
-  const result = await db
-    .prepare(SQL_INSERT_TRANSACTION)
-    .bind(
+  if (p.amount_cents <= 0 && !v2) throw new Error('signed_facts_require_schema11');
+  const sql = v2 ? SQL_INSERT_TRANSACTION.replace('external_id\n)', 'external_id, payer_reference, raw_vs, direction, identity_kind, identity_provenance\n)').replace('?)\n', '?, ?, ?, ?, ?, ?)\n') : SQL_INSERT_TRANSACTION;
+  const values = [
       args.bank_account_id,
       p.amount_cents, p.currency, p.counter_account ?? null, p.bank_code ?? null, p.bank_name ?? null,
       p.vs ?? null, p.ks ?? null, p.ss ?? null, p.message ?? null, p.sender_name ?? null,
@@ -552,29 +532,33 @@ export async function insertTransaction(db: D1Database, args: {
       p.comment ?? null, p.command_id ?? null,
       p.source, p.date, p.date_offset_min ?? null,
       p.transaction_id ?? null, p.external_id ?? null,
-    )
-    .run();
+  ];
+  if (v2) values.push(p.payer_reference ?? null, args.payload.raw_vs ?? args.payload.vs ?? null,
+    p.amount_cents > 0 ? 'incoming' : p.amount_cents < 0 ? 'outgoing' : 'zero',
+    p.identity_kind ?? (p.source === 'fio_api' && p.transaction_id ? 'movement' : 'observation'),
+    p.identity_provenance ?? (p.source === 'fio_api' ? 'fio_api_column22' : 'authenticated_email_unverified_movement'));
+  const result = await db.prepare(sql).bind(...values).run();
 
   if (result.meta.changes === 0) {
-    // Determine which constraint was hit. The same-day fuzzy unique index is
-    // a race guard for parallel email/API inserts between the preselect and insert.
-    if (p.transaction_id != null) {
+    // A duplicate must be explained by a scoped strong or transport identity.
+    if (p.transaction_id != null && p.source === 'fio_api') {
       const hit = await db.prepare(SQL_FIND_DUPLICATE_FIO).bind(args.bank_account_id, p.transaction_id).first<{ id: number }>();
-      if (hit) return { status: 'skipped', reason: 'duplicate_transaction_id' };
+      if (hit) {
+        const facts = hit as unknown as Transaction;
+        if (facts.amount_cents !== p.amount_cents || facts.currency !== p.currency || facts.date.slice(0,10) !== p.date.slice(0,10)
+          || (facts.identity_kind === 'movement' && (facts.raw_vs !== (p.raw_vs ?? args.payload.vs ?? null) || facts.payer_reference !== (p.payer_reference ?? null)))) throw new Error('bank_movement_fact_conflict');
+        return { status: 'skipped', reason: 'duplicate_transaction_id' };
+      }
     }
     if (p.external_id != null) {
-      const hit = await db.prepare(SQL_FIND_DUPLICATE_EXT).bind(p.external_id).first<{ id: number }>();
+      const hit = await db.prepare(SQL_FIND_DUPLICATE_EXT).bind(args.bank_account_id, p.external_id).first<{ id: number }>();
       if (hit) return { status: 'skipped', reason: 'duplicate_external_id' };
     }
-    if (await findFuzzyDuplicate(db, args.bank_account_id, p)) {
-      return { status: 'skipped', reason: 'fuzzy_duplicate' };
-    }
-    // Fallback — changes=0 without a known unique hit should not happen with the schema.
-    return { status: 'skipped', reason: 'fuzzy_duplicate' };
+    throw new Error('transaction_insert_constraint_conflict');
   }
 
   const rowId = result.meta.last_row_id;
-  const row = await db.prepare(SQL_SELECT_TRANSACTION_BY_ID).bind(rowId).first<Transaction>();
+  const row = await db.prepare(v2 ? 'SELECT * FROM transactions WHERE id = ?' : SQL_SELECT_TRANSACTION_BY_ID).bind(rowId).first<Transaction>();
   if (!row) throw new Error('insertTransaction: row vanished after insert');
   return { status: 'inserted', transaction: row };
 }
@@ -949,8 +933,14 @@ export async function getStatusData(db: D1Database): Promise<StatusData> {
 const SQL_PRUNE_PARSE_LOG = `DELETE FROM parse_log WHERE created_at < datetime('now', '-30 days')`;
 const SQL_PRUNE_WEBHOOK_LOG = `DELETE FROM webhook_log WHERE created_at < datetime('now', '-90 days')`;
 const SQL_PRUNE_EVENT_LOG = `DELETE FROM event_log WHERE created_at < datetime('now', '-30 days')`;
-const SQL_PRUNE_TRANSACTIONS = `DELETE FROM transactions WHERE created_at < datetime('now', '-90 days')`;
-const SQL_PRUNE_IDEMPOTENCY_KEYS = `DELETE FROM idempotency_keys WHERE created_at < datetime('now', '-24 hours')`;
+const SQL_PRUNE_TRANSACTIONS = `DELETE FROM transactions WHERE created_at < datetime('now', '-90 days')
+  AND NOT EXISTS (SELECT 1 FROM webhook_delivery_jobs j WHERE j.transaction_id=transactions.id
+    AND (j.status<>'delivered' OR j.business_outcome LIKE 'quarantined_%'))
+  AND NOT EXISTS (SELECT 1 FROM webhook_subscriptions s WHERE s.bank_account_id=transactions.bank_account_id
+    AND datetime(s.created_at)<=datetime(transactions.created_at)
+    AND (s.deleted_at IS NULL OR datetime(transactions.created_at)<datetime(s.deleted_at))
+    AND NOT EXISTS (SELECT 1 FROM webhook_delivery_jobs j WHERE j.transaction_id=transactions.id AND j.consumer_app_id=s.consumer_app_id))`;
+const SQL_PRUNE_IDEMPOTENCY_KEYS = `DELETE FROM idempotency_keys WHERE request_path <> '/bank-accounts' AND created_at < datetime('now', '-24 hours')`;
 const SQL_PRUNE_ADMIN_AUDIT_LOG = `DELETE FROM admin_audit_log WHERE created_at < datetime('now', '-90 days')`;
 const SQL_CLEAR_EXPIRED_PREV_SECRETS = `UPDATE webhook_consumers SET prev_secret_cipher = NULL, prev_expires_at = NULL WHERE prev_expires_at < datetime('now')`;
 

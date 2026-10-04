@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { buildWebhookEnvelope, signWebhook, verifyWebhook, WebhookVerificationError } from './relay';
 import type { Transaction } from './types';
+import { encodeRf } from './iso11649';
 
 const stubTx: Transaction = {
   id: 1,
@@ -63,6 +64,16 @@ async function verificationArgs(envelope: unknown, deliveryId = DELIVERY_ID, tim
 }
 
 describe('buildWebhookEnvelope', () => {
+  it('keeps canonical references intact while retaining the v1 RF compatibility projection', () => {
+    const tx = { ...stubTx, vs: null, message: encodeRf('0000000001') };
+    const v2 = buildWebhookEnvelope({ delivery_id: DELIVERY_ID, pairing_code: PAIRING_CODE, transaction: tx, event_version: '2' });
+    expect(v2.data.vs).toBeNull();
+    expect(v2.data.message).toBe(tx.message);
+    expect(tx.vs).toBeNull();
+    const v1 = buildWebhookEnvelope({ delivery_id: DELIVERY_ID, pairing_code: PAIRING_CODE, transaction: tx });
+    expect(v1.data.vs).toBe('0000000001');
+  });
+
   it('returns correct envelope shape', () => {
     const env = buildWebhookEnvelope({
       delivery_id: DELIVERY_ID,
@@ -74,7 +85,7 @@ describe('buildWebhookEnvelope', () => {
     expect(env.event_version).toBe('1');
     expect(env.delivery_id).toBe(DELIVERY_ID);
     expect(env.pairing_code).toBe(PAIRING_CODE);
-    expect(env.data).toBe(stubTx);
+    expect(env.data).toStrictEqual(stubTx);
     expect((env as unknown as Record<string, unknown>)['delivered_at']).toBeUndefined();
   });
 });

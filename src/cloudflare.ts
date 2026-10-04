@@ -87,6 +87,7 @@ import {
   findDeliveryJob,
   findDeliveryJobsForTransaction,
 } from './webhookDelivery';
+import { recoverBankAccount } from './bankRecovery';
 import { fetchNewTransactions, FioRateLimited, FioTransientFailure, mapFioTransaction, setFioPointer } from './fio';
 import type { ApiFetchAccount, BankAccount, Transaction } from './types';
 import type { GenericSchema, InferOutput } from 'valibot';
@@ -128,6 +129,8 @@ export interface Env extends VersionedSecretEnv {
   BACKUPS?: R2Bucket;
   /** Trusted authserv-id observed and verified from Cloudflare Email Routing. */
   EMAIL_AUTHSERV_ID?: string;
+  /** Explicit capability for the shared encrypted authenticated ingress spool. */
+  AUTHENTICATED_EMAIL_SPOOL?: 'on';
   /** Exact comma-separated callback hostnames allowed in production. */
   CALLBACK_HOST_ALLOWLIST?: string;
   /** Active application-layer backup key version. */
@@ -163,13 +166,28 @@ export async function processEmail(
   env: Env,
   envelope: EmailEnvelopeEvidence,
 ): Promise<void> {
-  // last-resort outer try/catch — must never rethrow
   let bodyText: string | undefined;
+  let spoolId: string | undefined;
+  const reader=rawStream.getReader();const parts:Uint8Array[]=[];let byteCount=0;
+  while(true) {
+    const item=await reader.read();if(item.done) break;
+    byteCount+=item.value.byteLength;
+    if(byteCount>512*1024) {await reader.cancel();throw new Error('email_body_limit');}
+    parts.push(item.value);
+  }
+  const rawArray=new Uint8Array(byteCount);let offset=0;
+  for(const part of parts) {rawArray.set(part,offset);offset+=part.length;}
+  const rawBytes=rawArray.buffer;
+  let binary='';for(let i=0;i<rawArray.length;i+=8192) binary+=String.fromCharCode(...rawArray.subarray(i,i+8192));
+  const bytesBase64=btoa(binary);
+  const rawMime = new TextDecoder().decode(rawBytes);
+  let r2SpoolKey:string|undefined;
+
   try {
     // Step 1: extract MIME
     let extracted: ExtractedEmail;
     try {
-      extracted = await extractEmailBody(rawStream);
+      extracted = await extractEmailBody(new Blob([rawBytes]).stream());
       bodyText = extracted.text;
     } catch (err) {
       const rawText = await new Response(rawStream).text().catch(() => '(failed to read raw)');
@@ -191,6 +209,16 @@ export async function processEmail(
       return;
     }
 
+    // R2 survives D1 outages. Spool only after strict bank authentication, but
+    // before the first account lookup or database side effect. Preserve bytes.
+    if(env.AUTHENTICATED_EMAIL_SPOOL==='on') {
+      if(!env.BACKUPS) throw new Error('authenticated_spool_binding_required');
+      const encrypted=await encryptSecret(JSON.stringify({bytesBase64,envelope}),env);
+      r2SpoolKey=`authenticated-email-pending/${await sha256Hex(`${identity.recipient}:${bytesBase64}`)}`;
+      const existing=await env.BACKUPS.head(r2SpoolKey);
+      if(!existing) await env.BACKUPS.put(r2SpoolKey,JSON.stringify(encrypted));
+    }
+
     // Resolve the bank account from authenticated envelope recipient, then classify.
     // The lookup is read-only and harmless for emails that fail an earlier gate —
     // the outcome's bankAccountId stays null for pre-account rejects, so parse_log
@@ -198,6 +226,24 @@ export async function processEmail(
     const allowlist = parseAllowlist(env.SENDER_ALLOWLIST);
     const pairingCode = extractPairingCode(identity.recipient);
     const account = pairingCode ? await findBankAccountByPairingCode(env.DB, pairingCode) : null;
+    const schema = await env.DB.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
+    if (account && schema?.value === '11') {
+      spoolId = await sha256Hex(`${account.id}:${extracted.messageId ?? await sha256Hex(rawMime)}`);
+      const digest = await sha256Hex(rawMime);
+      const encrypted = await encryptSecret(JSON.stringify({bytesBase64,envelope}),env);
+      await env.DB.prepare(`INSERT INTO authenticated_email_spool(id,bank_account_id,body_sha256,cipher,key_version)
+        VALUES(?,?,?,?,?) ON CONFLICT(id) DO NOTHING`).bind(spoolId,account.id,digest,encrypted.cipher,encrypted.keyVersion).run();
+      const stored = await env.DB.prepare('SELECT body_sha256 FROM authenticated_email_spool WHERE id=?').bind(spoolId).first<{body_sha256:string}>();
+      if (stored?.body_sha256 !== digest) throw new Error('email_transport_body_conflict');
+    }
+    async function completeSpool() {
+      if(spoolId) await env.DB.prepare("UPDATE authenticated_email_spool SET state='completed',completed_at=datetime('now') WHERE id=?").bind(spoolId).run();
+      if(r2SpoolKey) await env.BACKUPS!.delete(r2SpoolKey);
+    }
+    if (account && schema?.value==='11') {
+      const enabled=await env.DB.prepare('SELECT ingest_enabled FROM bank_accounts WHERE id=?').bind(account.id).first<{ingest_enabled:number}>();
+      if(enabled?.ingest_enabled===0) throw new Error('email_connection_paused');
+    }
     const outcome = classifyEmail(extracted, identity, account, allowlist);
 
     // email_received audit fires once the email clears the security gate, before
@@ -209,24 +255,27 @@ export async function processEmail(
     }
 
     if (outcome.kind === 'reject' || outcome.kind === 'skip') {
+      if(r2SpoolKey && (outcome.reason.startsWith('parse_failed') || outcome.reason.startsWith('unknown_') || outcome.reason.startsWith('no_pairing'))) throw new Error('authenticated_email_quarantined');
       await insertParseLog(env.DB, {
         bank_account_id: outcome.bankAccountId ?? null,
         error_message: outcome.reason,
         raw_data: sanitizeDiagnosticRaw(extracted.text),
         external_id: extracted.messageId ?? null,
       });
+      await completeSpool();
       return;
     }
 
     // Step 9: insert transaction (outcome.kind === 'insert')
     const acct = outcome.account;
+    if (!outcome.parsed.date) throw new Error('email_missing_bank_date');
     let result;
     try {
       result = await insertTransaction(env.DB, {
         bank_account_id: acct.id,
         payload: {
           ...outcome.parsed,
-          date: outcome.parsed.date ?? new Date().toISOString(),
+          date: outcome.parsed.date,
           external_id: extracted.messageId ?? null,
         },
       });
@@ -237,13 +286,14 @@ export async function processEmail(
         raw_data: sanitizeDiagnosticRaw(JSON.stringify({ ...outcome.parsed, external_id: extracted.messageId ?? null })),
         external_id: extracted.messageId ?? null,
       });
-      return;
+      throw new Error('email_db_insert_failed');
     }
 
     // Step 10: gate on 'inserted' — idempotence rule
     if (result.status === 'skipped') {
       log('tx_skipped', { reason: result.reason, bank_account_id: acct.id });
       await writeEvent(env.DB, { event_type: 'tx_skipped', bank_account_id: acct.id, detail: { reason: result.reason } });
+      await completeSpool();
       return;
     }
 
@@ -252,6 +302,7 @@ export async function processEmail(
     await writeEvent(env.DB, { event_type: 'tx_inserted', bank_account_id: acct.id, detail: { tx_id: tx.id } });
 
     await createWebhookDeliveryCoordinator(env).observeTransaction(tx.id);
+    await completeSpool();
 
   } catch (err) {
     // Last-resort catch — log unhandled exception, never rethrow
@@ -264,6 +315,7 @@ export async function processEmail(
       // swallow insertParseLog failure — we cannot let the catch block throw
     }
     logError('email_unhandled_exception', err, {});
+    throw new Error('email_ingest_incomplete');
   }
 }
 
@@ -378,6 +430,12 @@ async function runBankApiSync(env: Env, account: ApiFetchAccount): Promise<BankA
 
   const isBackfill = !account.api_backfill_done;
   try {
+    const schema = await env.DB.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
+    if(schema?.value === '11') {
+      const result=await recoverBankAccount(env.DB,account,env,fioProxyConfig(env));
+      await ensureDeliveryJobs(env.DB);
+      return {bank_account_id:account.id,provider:account.account_type,inserted:result.inserted,skipped_duplicate:result.skipped,skipped_outgoing:0,parse_errors:0,queued_webhooks:0,backfill:isBackfill,deferred:false};
+    }
     const token = await decryptSecret(account.api_token_cipher, account.api_token_key_ver, env);
     if (isBackfill && account.api_last_success_at === null) {
       await markBankAccountApiFetchStarted(env.DB, account.id);
@@ -423,7 +481,7 @@ async function runBankApiSync(env: Env, account: ApiFetchAccount): Promise<BankA
         continue;
       }
 
-      if (mapped === null) {
+      if (mapped === null || mapped.amount_cents <= 0) {
         skippedOutgoing++;
         await insertParseLog(env.DB, {
           bank_account_id: account.id,
@@ -486,14 +544,7 @@ async function runBankApiSync(env: Env, account: ApiFetchAccount): Promise<BankA
 
 async function runDueBankApiSyncs(env: Env): Promise<void> {
   const accounts = await listDueApiFetchAccounts(env.DB, apiMinIntervalS(env));
-  const processedTokenPrefixes = new Set<string>();
   for (const account of accounts) {
-    const tokenKey = account.api_token_prefix ?? `account:${account.id}`;
-    if (processedTokenPrefixes.has(tokenKey)) {
-      log('api_sync_skipped_duplicate_token_prefix', { bank_account_id: account.id, account_type: account.account_type });
-      continue;
-    }
-    processedTokenPrefixes.add(tokenKey);
 
     try {
       const result = await runBankApiSync(env, account);
@@ -857,6 +908,11 @@ async function dispatch(
     if (input.fio_api_token !== undefined && (input.account_type ?? 'FIO') !== 'FIO') {
       return jsonResponse({ error: 'fio_api_token_supported_only_for_fio' }, 400);
     }
+    const expanded=await env.DB.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
+    if(input.ingest_enabled===false && expanded?.value!=='11') return jsonResponse({error:'paused_ingest_requires_schema11'},409);
+    const capability=expanded?.value==='11' ? await env.DB.prepare('SELECT event_version FROM webhook_consumers WHERE app_id=?').bind(input.owner_app_id).first<{event_version:string}>() : null;
+    if(capability?.event_version==='2' && (input.ingest_mode==='email'||input.ingest_mode==='both') && (env.AUTHENTICATED_EMAIL_SPOOL!=='on'||!env.BACKUPS)) return jsonResponse({error:'durable_email_capability_not_configured'},503);
+    if(capability?.event_version==='2' && input.ingest_mode==='both') return jsonResponse({error:'both_requires_verified_correlation'},409);
     const pairingCode = await generateUniquePairingCode(env.DB);
     const ingestMode = input.ingest_mode ?? (input.fio_api_token ? 'api' : 'email');
     const createEmailRoute = ingestMode === 'email' || ingestMode === 'both';
@@ -888,6 +944,11 @@ async function dispatch(
       throw err;
     }
 
+    const schemaVersion = await env.DB.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
+    if (input.ingest_enabled === false) {
+      if (schemaVersion?.value !== '11') throw new Error('paused_ingest_requires_schema11');
+      await env.DB.prepare('UPDATE bank_accounts SET ingest_enabled=0,api_fetch_enabled=0 WHERE id=?').bind(account.id).run();
+    }
     // Best-path CF provision (stamp outbox with the real id + synchronous rule
     // create). Deferred on failure — the outbox row remains for the reconciler
     // and the client still gets 201.
@@ -925,6 +986,8 @@ async function dispatch(
     if (existing instanceof Response) return existing;
     const input = parseOr400(UpdateBankAccountSchema, bodyText);
     if (input instanceof Response) return input;
+    if (input.account_number !== undefined && input.account_number !== existing.account_number
+      && await env.DB.prepare('SELECT 1 FROM transactions WHERE bank_account_id=? LIMIT 1').bind(id).first()) return jsonResponse({error:'account_identity_immutable'},409);
     const updated = await updateBankAccount(env.DB, id, input);
     if (!updated) return jsonResponse({ error: 'not_found' }, 404);
     return jsonResponse(updated);
@@ -962,6 +1025,22 @@ async function dispatch(
     return new Response(null, { status: 204 });
   }
 
+  // Bounded tenant control for a pre-mapped connection, plus safe credential proof.
+  const stateMatch=url.pathname.match(/^\/bank-accounts\/(\d+)\/ingest-state$/);
+  if(stateMatch && (req.method==='GET' || req.method==='PUT')) {
+    const id=Number(stateMatch[1]);
+    const existing=await requireOwnedAccount(env,id,authCtx);
+    if(existing instanceof Response) return existing;
+    const schema=await env.DB.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
+    if(schema?.value!=='11') return jsonResponse({error:'schema11_required'},409);
+    if(req.method==='PUT') {
+      let input; try {input=JSON.parse(bodyText);} catch{return jsonResponse({error:'invalid_json'},400);}
+      if(typeof input.enabled!=='boolean') return jsonResponse({error:'enabled_required'},400);
+      await env.DB.prepare('UPDATE bank_accounts SET ingest_enabled=? WHERE id=?').bind(input.enabled?1:0,id).run();
+    }
+    return jsonResponse(await env.DB.prepare('SELECT ingest_enabled,api_token_hash FROM bank_accounts WHERE id=?').bind(id).first());
+  }
+
   // PUT /bank-accounts/:id/fio-token — Fio adapter token endpoint; storage columns are provider-neutral api_*.
   const fioTokenMatch = url.pathname.match(/^\/bank-accounts\/(\d+)\/fio-token$/);
   if (fioTokenMatch && req.method === 'PUT') {
@@ -988,6 +1067,8 @@ async function dispatch(
         ingest_mode: input.ingest_mode ?? (existing.ingest_mode === 'email' ? 'api' : existing.ingest_mode),
       });
       if (!updated) return jsonResponse({ error: 'not_found' }, 404);
+      const schemaVersion=await env.DB.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
+      if(schemaVersion?.value==='11') await env.DB.prepare('UPDATE bank_accounts SET api_token_hash=? WHERE id=?').bind(await sha256Hex(rawToken),id).run();
       log('bank_account_api_token_updated', { bank_account_id: id, account_type: existing.account_type, api_token_prefix: updated.api_token_prefix });
       return jsonResponse(updated);
     }
@@ -1085,6 +1166,8 @@ async function dispatch(
     if (authCtx.type === 'tenant') return forbidden();
     const input = parseOr400(CreateConsumerSchema, bodyText);
     if (input instanceof Response) return input;
+    const schemaVersion=await env.DB.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
+    if(input.event_version==='2' && schemaVersion?.value!=='11') return jsonResponse({error:'v2_requires_schema11'},409);
     let callbackUrl: string;
     try {
       callbackUrl = validateCallbackUrl(input.callback_url, { environment: env.ENV, allowlist: env.CALLBACK_HOST_ALLOWLIST });
@@ -1099,6 +1182,7 @@ async function dispatch(
     const secretCipher = await webhookEncrypt(plain, env.WEBHOOK_KEK);
     const consumer = await createConsumer(env.DB, {
       app_id: input.app_id,
+      event_version: input.event_version ?? '1',
       callback_url: callbackUrl,
       secret_cipher: secretCipher,
       secret_hash: secretHash,
@@ -1279,6 +1363,35 @@ async function dispatch(
     });
     const next_cursor = entries.length === limit ? entries[entries.length - 1]!.id : null;
     return jsonResponse({ jobs: entries, next_cursor });
+  }
+
+  // Account-scoped complete export. Caller persists both cursor and fixed
+  // high-water value; newer rows never shift a cutover traversal.
+  const exportMatch=url.pathname.match(/^\/bank-accounts\/(\d+)\/transaction-export$/);
+  if(exportMatch && req.method==='GET') {
+    const id=Number(exportMatch[1]);
+    const account=await requireOwnedAccount(env,id,authCtx);
+    if(account instanceof Response) return account;
+    const maximum=await env.DB.prepare('SELECT COALESCE(MAX(id),0) AS id FROM transactions WHERE bank_account_id=?').bind(id).first<{id:number}>();
+    const high=Number(url.searchParams.get('high_water') ?? maximum?.id ?? 0);
+    const cursor=Number(url.searchParams.get('cursor') ?? 0);
+    const limit=Number(url.searchParams.get('limit') ?? 200);
+    if(!Number.isSafeInteger(high)||high<0||!Number.isSafeInteger(cursor)||cursor<0||!Number.isSafeInteger(limit)||limit<1||limit>200) return jsonResponse({error:'invalid_cursor'},400);
+    const rows=await env.DB.prepare('SELECT * FROM transactions WHERE bank_account_id=? AND id>? AND id<=? ORDER BY id LIMIT ?').bind(id,cursor,high,limit).all<Transaction>();
+    return jsonResponse({bank_account_id:id,high_water:high,cursor:rows.results.at(-1)?.id ?? cursor,complete:rows.results.length<limit,transactions:rows.results});
+  }
+  // Historical missing intents are explicit, admin-only and limited to one
+  // consumer/account/window. Existing archived payloads are never rewritten.
+  if(url.pathname==='/admin/cutover-reconcile' && req.method==='POST') {
+    if(authCtx.type!=='admin') return forbidden();
+    let input;try{input=JSON.parse(bodyText);}catch{return jsonResponse({error:'invalid_json'},400);}
+    if(typeof input.manifest_sha256!=='string'||!/^[0-9a-f]{64}$/.test(input.manifest_sha256)||typeof input.consumer_app_id!=='string'
+      ||![input.account_id,input.from_id,input.through_id].every(n=>Number.isSafeInteger(n)&&n>0)||input.through_id<input.from_id) return jsonResponse({error:'invalid_manifest_window'},400);
+    const account=await findBankAccountById(env.DB,input.account_id);
+    if(account?.owner_app_id!==input.consumer_app_id) return forbidden();
+    const created=await ensureDeliveryJobs(env.DB,undefined,{accountId:input.account_id,consumerAppId:input.consumer_app_id,fromId:input.from_id,throughId:input.through_id});
+    await writeEvent(env.DB,{event_type:'cutover_reconcile',bank_account_id:input.account_id,detail:{consumer:input.consumer_app_id,manifest_sha256:input.manifest_sha256,from_id:input.from_id,through_id:input.through_id,created}});
+    return jsonResponse({created});
   }
 
   // GET /transactions
@@ -1465,6 +1578,32 @@ export default {
     }
 
     if (runReconciliation) {
+      if(env.AUTHENTICATED_EMAIL_SPOOL==='on' && env.BACKUPS) {
+        const cursor=await env.DB.prepare("SELECT value FROM schema_meta WHERE key='email_spool_cursor'").first<{value:string}>();
+        const page=await env.BACKUPS.list({prefix:'authenticated-email-pending/',limit:10,...(cursor?.value ? {cursor:cursor.value} : {})});
+        for(const object of page.objects) {
+          try {
+            const stored=await env.BACKUPS.get(object.key);if(!stored) continue;
+            const encrypted=JSON.parse(await stored.text());
+            const message=JSON.parse(await decryptSecret(encrypted.cipher,encrypted.keyVersion,env));
+            const bytes=Uint8Array.from(atob(message.bytesBase64),c=>c.charCodeAt(0));
+            await processEmail(new Blob([bytes]).stream(),env,message.envelope);
+          } catch { log('authenticated_email_recovery_pending',{spool_key:object.key}); }
+        }
+        await env.DB.prepare("INSERT INTO schema_meta(key,value) VALUES('email_spool_cursor',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(page.truncated?page.cursor:'').run();
+      }
+      const schema = await env.DB.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
+      if(schema?.value==='11') {
+        const pending = await env.DB.prepare("SELECT id,cipher,key_version FROM authenticated_email_spool WHERE state='pending' ORDER BY attempts,created_at LIMIT 10").all<{id:string;cipher:string;key_version:number}>();
+        for(const row of pending.results) {
+          try {
+            await env.DB.prepare('UPDATE authenticated_email_spool SET attempts=attempts+1 WHERE id=?').bind(row.id).run();
+            const message=JSON.parse(await decryptSecret(row.cipher,row.key_version,env));
+            const restored=Uint8Array.from(atob(message.bytesBase64),c=>c.charCodeAt(0));
+          await processEmail(new Blob([restored]).stream(),env,message.envelope);
+          } catch { log('email_recovery_pending',{spool_id:row.id}); }
+        }
+      }
       // Durable webhook healing runs independently of a new bank event. It
       // derives jobs first, so a transaction committed before a failed
       // queue.send is recovered within the bounded reconciliation interval.

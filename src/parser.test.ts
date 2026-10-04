@@ -161,14 +161,16 @@ describe('parseEmail — Fio CZK incoming', () => {
     expect(result.bank_name).toBe('Komerční banka, a.s.');
     expect(result.sender_name).toBe('Jan Novak');
     expect(result.message).toBe('Test Payment Fio');
-    expect(result.transaction_id).toBe('111122223333');
+    expect(result.transaction_id).toBeNull();
+    expect(result.command_id).toBe('111122223333');
+    expect(result.identity_kind).toBe('observation');
     expect(result.external_id).toBeNull();
     // API-only fields must be null for email source
     expect(result.user_identification).toBeNull();
     expect(result.transaction_type).toBeNull();
     expect(result.performed_by).toBeNull();
     expect(result.comment).toBeNull();
-    expect(result.command_id).toBeNull();
+
   });
 });
 
@@ -247,9 +249,9 @@ describe('parseEmail — AirBank incoming', () => {
 // ---------------------------------------------------------------------------
 
 describe('parseEmail — outgoing transaction', () => {
-  it('returns null for negative amount', () => {
+  it('preserves negative amount as an observation', () => {
     const result = parseEmail(FIO_OUTGOING, 'fio_email');
-    expect(result).toBeNull();
+    expect(result).toMatchObject({amount_cents:-50000,direction:'outgoing'});
   });
 });
 

@@ -21,7 +21,7 @@ export interface BankAccount {
 export interface Transaction {
   id: number;
   bank_account_id: number;
-  /** INTEGER, lowest unit (e.g. 1990 = 19.90 CZK), incoming-only — always positive */
+  /** INTEGER, lowest unit (e.g. 1990 = 19.90 CZK), signed exact minor units */
   amount_cents: number;
   /** ISO 4217 alpha-3 uppercase (CZK/EUR/USD) */
   currency: string;
@@ -43,6 +43,12 @@ export interface Transaction {
   comment: string | null;
   /** Fio API column17 — ID pokynu, available only from Fio API pull */
   command_id: string | null;
+  /** V2 facts; absent only on retained v1 records. */
+  payer_reference?: string | null;
+  raw_vs?: string | null;
+  direction?: 'incoming' | 'outgoing' | 'zero';
+  identity_kind?: 'movement' | 'observation' | 'historical_unverified';
+  identity_provenance?: string;
   source: 'email' | 'fio_api';
   date: string;
   /** Original timezone offset in minutes (e.g. CET=60, CEST=120). Debug only — all queries use UTC date. */
@@ -54,7 +60,7 @@ export interface Transaction {
 export interface WebhookEnvelope {
   event: 'transaction.received';
   /** Bumped when shape of `data` or signing string changes */
-  event_version: '1';
+  event_version: '1' | '2';
   /** ULID, stable across retries — sole idempotence key */
   delivery_id: string;
   pairing_code: string;
@@ -74,7 +80,7 @@ export type InsertResult =
   | { status: 'inserted'; transaction: Transaction }
   | {
       status: 'skipped';
-      reason: 'duplicate_transaction_id' | 'duplicate_external_id' | 'fuzzy_duplicate';
+      reason: 'duplicate_transaction_id' | 'duplicate_external_id';
     };
 
 export interface WebhookConsumer {

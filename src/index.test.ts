@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import type { D1Database, D1Result, D1PreparedStatement, Queue } from '@cloudflare/workers-types';
+import type { D1Database, D1Result, D1PreparedStatement, Queue, ScheduledEvent, ExecutionContext } from '@cloudflare/workers-types';
 import { resetSchemaCheckCache } from './db';
 import type { Env } from './cloudflare';
 import { processEmail as processEmailWithEnvelope } from './cloudflare';
@@ -537,7 +537,7 @@ describe('email() — failure paths each write parse_log', () => {
     sqlite.prepare(`DROP TABLE transactions`).run();
 
     const raw = makeStream(buildFioEmail(`${pairingCode}@banksync.festapp.net`));
-    await processEmail(raw, env);
+    await expect(processEmail(raw, env)).rejects.toThrow('email_ingest_incomplete');
 
     const row = sqlite.prepare(`SELECT error_message FROM parse_log LIMIT 1`).get() as { error_message: string } | undefined;
     expect(row?.error_message).toMatch(/^db_insert_failed:/);
@@ -1932,5 +1932,40 @@ describe('GET /health/deep — admin only', () => {
     expect(components).toHaveProperty('db_read');
     expect(components).toHaveProperty('db_write');
     expect(components).toHaveProperty('outbox_drift');
+  });
+});
+
+
+describe('authenticated encrypted email spool',()=>{
+  function bucket() {
+    const objects=new Map<string,string>();
+    const binding={
+      async head(key:string) {return objects.has(key)?{key}:null;},
+      async put(key:string,value:string) {objects.set(key,value);},
+      async get(key:string) {const value=objects.get(key);return value===undefined?null:{async text(){return value;}};},
+      async delete(key:string) {objects.delete(key);},
+      async list() {return {objects:[...objects.keys()].map(key=>({key})),truncated:false};},
+    } as unknown as NonNullable<Env['BACKUPS']>;
+    return {objects,binding};
+  }
+  it('survives D1 outage before account lookup and recovers through the scheduled pipeline',async()=>{
+    const {db,sqlite}=makeTestDb();const env=makeEnv(db);const storage=bucket();
+    env.AUTHENTICATED_EMAIL_SPOOL='on';env.BACKUPS=storage.binding;
+    const {pairingCode}=await seedFullSetup(db,sqlite);
+    const prepare=db.prepare.bind(db);
+    db.prepare=(()=>{throw new Error('D1 unavailable');}) as typeof db.prepare;
+    await expect(processEmail(makeStream(buildFioEmail(`${pairingCode}@banksync.festapp.net`)),env)).rejects.toThrow('email_ingest_incomplete');
+    expect(storage.objects.size).toBe(1);
+    for(const cipher of storage.objects.values()) expect(cipher).not.toContain('Test Sender');
+    db.prepare=prepare;
+    await worker.scheduled({cron:'* * * * *',scheduledTime:0} as unknown as ScheduledEvent,env,{} as ExecutionContext);
+    expect(storage.objects.size).toBe(0);
+    expect(sqlite.prepare('SELECT count(*) AS n FROM transactions').get()).toEqual({n:1});
+  });
+  it('does not spool unauthenticated messages',async()=>{
+    const {db,sqlite}=makeTestDb();const env=makeEnv(db);const storage=bucket();env.AUTHENTICATED_EMAIL_SPOOL='on';env.BACKUPS=storage.binding;
+    const {pairingCode}=await seedFullSetup(db,sqlite);
+    await processEmail(makeStream(buildFioEmail(`${pairingCode}@banksync.festapp.net`).replace('dmarc=pass','dmarc=fail').replace('dkim=pass','dkim=fail')),env);
+    expect(storage.objects.size).toBe(0);expect(sqlite.prepare('SELECT count(*) AS n FROM transactions').get()).toEqual({n:0});
   });
 });
