@@ -312,7 +312,7 @@ and `activate`; historical import uses `vs`. A collision during import is record
 and locks further allocation until an operator resolves the inventory.
 
 Enrolled tenants `POST /bank-accounts/:id/payment-references` with `source_ref` and
-`payload_hash` to reserve a cryptographically random unique symbol, optionally requesting `variable_symbol` (1-10 digits).
+`payload_hash` to reserve a cryptographically random unique ten-digit symbol, optionally requesting `variable_symbol` (1-10 digits).
 `GET` with `source_ref` retrieves only the caller's reservation. The same immutable
 command returns the same reservation; a different command or requested symbol
 collides with 409 `reference_conflict`. Leading zeros share a namespace. A requested
