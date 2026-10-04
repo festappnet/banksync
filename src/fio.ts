@@ -19,6 +19,17 @@ export class FioApiError extends Error {
   }
 }
 
+/** Fio documents HTTP 500 as a nonexistent/inactive token, including one
+ * created but not yet authorized in Internetbanking. Never infer this from
+ * a proxy-generated 500 or a transport timeout. */
+export class FioTokenInvalidOrInactive extends FioApiError {
+  readonly code = 'fio_token_invalid_or_inactive';
+  constructor() {
+    super('fio_token_invalid_or_inactive', 500);
+    this.name = 'FioTokenInvalidOrInactive';
+  }
+}
+
 export class FioRateLimited extends FioApiError {
   constructor(status: number, public readonly retryAfterS: number | null) {
     super(`Fio API ${status}`, status);
@@ -65,10 +76,10 @@ async function fioRequest(
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-fio-proxy-secret': proxy.secret },
       body: JSON.stringify(date === undefined ? { op, token } : { op, token, date, ...(toDate ? { toDate } : {}) }),
-      signal: AbortSignal.timeout(20_000),
+      signal: AbortSignal.timeout(55_000),
     });
   }
-  return fetch(directUrl, {signal: AbortSignal.timeout(20_000)});
+  return fetch(directUrl, {signal: AbortSignal.timeout(55_000)});
 }
 
 function retryAfterSeconds(headers: Headers): number | null {
@@ -78,7 +89,10 @@ function retryAfterSeconds(headers: Headers): number | null {
   return Number.isFinite(n) && n >= 0 ? n : null;
 }
 
-async function ensureFioResponse(res: Response): Promise<void> {
+async function ensureFioResponse(res: Response, proxy?: FioProxyConfig): Promise<void> {
+  if (res.status === 500 && (!proxy || res.headers.get("x-fio-upstream-status") === "500")) {
+    throw new FioTokenInvalidOrInactive();
+  }
   if (res.status === 429 || res.status === 409) {
     throw new FioRateLimited(res.status, retryAfterSeconds(res.headers));
   }
@@ -92,7 +106,7 @@ async function ensureFioResponse(res: Response): Promise<void> {
 
 export async function fetchNewTransactions(token: string, proxy?: FioProxyConfig): Promise<FioTransaction[]> {
   const res = await fioRequest('transactions', token, `${endpoint('last', token)}/transactions.json`, proxy);
-  await ensureFioResponse(res);
+  await ensureFioResponse(res, proxy);
   const json = await res.json() as {
     accountStatement?: {
       transactionList?: {
@@ -109,7 +123,7 @@ export async function setFioPointer(token: string, yyyyMmDd: string, proxy?: Fio
     throw new Error('invalid_fio_pointer_date');
   }
   const res = await fioRequest('set-last-date', token, `${endpoint('set-last-date', token)}/${yyyyMmDd}/`, proxy, yyyyMmDd);
-  await ensureFioResponse(res);
+  await ensureFioResponse(res, proxy);
 }
 
 function column(raw: FioTransaction, idx: number): string | null {
@@ -206,7 +220,7 @@ export async function fetchFioStatement(token: string, from: string, to: string,
   for (const date of [from,to]) if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date))) throw new Error('invalid_statement_window');
   if (from > to || Date.parse(to)-Date.parse(from) > 90*86400000) throw new Error('unbounded_statement_window');
   const response = await fioRequest('periods',token,`${endpoint('periods',token)}/${from}/${to}/transactions.json`,proxy,from,to);
-  await ensureFioResponse(response);
+  await ensureFioResponse(response, proxy);
   const document = await response.json() as {accountStatement?: {info?:Record<string,unknown>; transactionList?:{transaction?:FioTransaction[]|FioTransaction}}};
   const statement = document.accountStatement;
   if (!statement?.info) throw new Error('missing_statement_info');

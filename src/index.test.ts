@@ -1661,6 +1661,14 @@ describe('tenant scope — bank account isolation', () => {
     const accounts = await res.json() as Array<{ owner_app_id: string }>;
     expect(accounts.length).toBe(1);
     expect(accounts[0]?.owner_app_id).toBe('festapp');
+    const all = await (await adminReq('GET', '/bank-accounts', env)).json() as Array<{id:number;owner_app_id:string}>;
+    const own = all.find(a => a.owner_app_id === 'festapp')!;
+    const foreign = all.find(a => a.owner_app_id === 'tutoring')!;
+    const detail = await tenantReq('GET', `/bank-accounts/${own.id}`, env, tenantKey);
+    expect(detail.status).toBe(200);
+    expect(await detail.json()).not.toHaveProperty('api_token_cipher');
+    expect((await tenantReq('GET', `/bank-accounts/${foreign.id}`, env, tenantKey)).status).toBe(403);
+
   });
 
   it('tenant cannot subscribe itself to a foreign account, while admin can share explicitly', async () => {
@@ -1987,6 +1995,16 @@ describe('schema11 immediate webhook dispatch',()=>{
       transactionList:{transaction:[{...fioApiTx('990001'),column0:{value:new Date().toISOString().slice(0,10)}}]}}}))));
     return {db,sqlite,env,accountId,queueSend};
   }
+  it('exposes a stable inactive-token error without importing or dispatching',async()=>{
+    const {env,sqlite,accountId}=await setup();
+    vi.stubGlobal('fetch',vi.fn(async()=>new Response('private upstream body',{status:500})));
+    const response=await adminReq('POST',`/bank-accounts/${accountId}/fio-sync`,env);
+    expect(response.status).toBe(422);
+    expect(await response.json()).toEqual({error:'fio_token_invalid_or_inactive',bank_http_status:500});
+    expect(sqlite.prepare('SELECT api_last_error FROM bank_accounts WHERE id=?').get(accountId))
+      .toEqual({api_last_error:'fio_token_invalid_or_inactive'});
+    expect(sqlite.prepare('SELECT count(*) AS n FROM transactions').get()).toEqual({n:0});
+  });
   it('queues a new v2 webhook before manual import returns without a cron tick',async()=>{
     const {env,accountId,queueSend}=await setup();
     const response=await adminReq('POST',`/bank-accounts/${accountId}/fio-sync`,env);
