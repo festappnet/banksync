@@ -21,7 +21,11 @@ export async function referenceScope(db:D1Database,accountId:number,appId:string
 }
 export async function lookupPaymentReference(db:D1Database,physical:string,app:string,source:string){return db.prepare('SELECT * FROM payment_references WHERE physical_account_id=? AND app_id=? AND source_ref=?').bind(physical,app,source).first<PaymentReference>();}
 // Unbiased cryptographic sampling in the complete 1-10 digit VS namespace.
-function randomVariableSymbol(){const range=9999999999,space=2**48,limit=Math.floor(space/range)*range;for(;;){const words=crypto.getRandomValues(new Uint32Array(2)),value=(words[0]!&0xffff)*2**32+words[1]!;if(value<limit)return String(value%range+1);}}
+function randomVariableSymbol(){
+ // Accept only the ten equally likely byte values 0-9; no biased reduction.
+ const digits:string[]=[];
+ for(;;){for(const value of crypto.getRandomValues(new Uint8Array(32))){if(value>=10)continue;digits.push(String(value));if(digits.length===10){const symbol=digits.join('').replace(/^0+/,'');if(symbol)return symbol;digits.length=0;}}}
+}
 export async function reservePaymentReference(db:D1Database,physical:string,app:string,source:string,payloadHash:string,legacyVs?:string,importHistorical=false):Promise<PaymentReference>{
  if(!source||source.length>255||!/^[a-f0-9]{64}$/.test(payloadHash))throw Error('reference_invalid');
  const old=await lookupPaymentReference(db,physical,app,source);if(old){if(old.payload_hash!==payloadHash||(legacyVs!==undefined&&old.normalized_vs!==normalizeVs(legacyVs)))throw Error('reference_conflict');return old;}
