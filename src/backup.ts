@@ -28,6 +28,8 @@ export interface BackupResult {
  * completeness test fails if any application table is neither here nor in
  * BACKUP_EXCLUDED, so a new table can never be silently omitted from backups. */
 export const TABLES = [
+  'bank_recovery_batches', 'authenticated_email_spool',
+  'physical_accounts', 'account_aliases', 'payment_reference_grants', 'payment_references', 'payment_reference_conflicts',
   'bank_accounts',
   'transactions',
   'webhook_consumers',
@@ -46,6 +48,7 @@ export const TABLES = [
 /** Application tables deliberately NOT backed up, each with a stated reason.
  * A table must be in TABLES or here — the completeness test enforces it. */
 export const BACKUP_EXCLUDED: Record<string, string> = {
+  bank_poll_leases: 'ephemeral poll locks; restored locks must be reacquired',
   idempotency_keys: 'ephemeral response cache; may contain sensitive historic responses',
   rate_limit_buckets: 'ephemeral abuse-control counters',
 };
@@ -165,6 +168,8 @@ export async function buildSqlDump(db: D1Database): Promise<{
 
   const rowCounts: Record<string, number> = {};
   for (const table of TABLES) {
+    if(Number(versionRow?.value??0)<11 && ['bank_recovery_batches','authenticated_email_spool'].includes(table))continue;
+    if(Number(versionRow?.value??0)<12 && ['physical_accounts','account_aliases','payment_reference_grants','payment_references','payment_reference_conflicts'].includes(table))continue;
     const r = await db.prepare(`SELECT * FROM ${table}`).all<Record<string, unknown>>();
     rowCounts[table] = r.results.length;
     if (r.results.length === 0) continue;
@@ -173,7 +178,7 @@ export async function buildSqlDump(db: D1Database): Promise<{
     lines.push(`-- ${table} (${r.results.length} rows)`);
     const insert = table === 'schema_meta' ? 'INSERT OR REPLACE INTO' : 'INSERT INTO';
     for (const row of r.results) {
-      const values = cols.map(c => sqlValue(row[c])).join(', ');
+      const values = cols.map(c => sqlValue(table==='physical_accounts' && c==='allocation_enabled'?0:row[c])).join(', ');
       lines.push(`${insert} ${table} (${cols.join(', ')}) VALUES (${values});`);
     }
     lines.push('');
