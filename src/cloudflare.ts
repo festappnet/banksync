@@ -88,7 +88,7 @@ import {
   findDeliveryJobsForTransaction,
 } from './webhookDelivery';
 import { recoverBankAccount } from './bankRecovery';
-import { fetchNewTransactions, FioRateLimited, FioTransientFailure, mapFioTransaction, setFioPointer } from './fio';
+import { fetchNewTransactions, FioRateLimited, FioTransientFailure, FioTokenInvalidOrInactive, mapFioTransaction, setFioPointer } from './fio';
 import type { ApiFetchAccount, BankAccount, Transaction } from './types';
 import type { GenericSchema, InferOutput } from 'valibot';
 
@@ -530,7 +530,7 @@ async function runBankApiSync(env: Env, account: ApiFetchAccount): Promise<BankA
       deferred: false,
     };
   } catch (err) {
-    await markBankAccountApiFetchFailure(env.DB, account.id, String(err));
+    await markBankAccountApiFetchFailure(env.DB, account.id, err instanceof FioTokenInvalidOrInactive ? err.code : String(err));
     if (err instanceof FioRateLimited) {
       await writeEvent(env.DB, {
         event_type: 'api_rate_limited',
@@ -980,6 +980,10 @@ async function dispatch(
 
   // PUT /bank-accounts/:id
   const baMatch = url.pathname.match(/^\/bank-accounts\/(\d+)$/);
+  if (baMatch && req.method === 'GET') {
+    const account = await requireOwnedAccount(env, Number(baMatch[1]), authCtx);
+    return account instanceof Response ? account : jsonResponse(account);
+  }
   if (baMatch && req.method === 'PUT') {
     const id = Number(baMatch[1]);
     const existing = await requireOwnedAccount(env, id, authCtx);
@@ -1136,6 +1140,9 @@ async function dispatch(
         api_backfill_done: updated?.api_backfill_done ?? false,
       });
     } catch (err) {
+      if (err instanceof FioTokenInvalidOrInactive) {
+        return jsonResponse({ error: err.code, bank_http_status: err.status }, 422);
+      }
       if (err instanceof FioRateLimited || err instanceof FioTransientFailure) {
         logError('fio_api_manual_sync_failed', err, { bank_account_id: id });
         return jsonResponse({ error: 'fio_api_transient_failure' }, 503);

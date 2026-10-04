@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
-import { fetchNewTransactions, FioRateLimited, FioTransientFailure, mapFioTransaction, setFioPointer, type FioTransaction } from './fio';
+import { fetchNewTransactions, FioRateLimited, FioTransientFailure, FioTokenInvalidOrInactive, mapFioTransaction, setFioPointer, type FioTransaction } from './fio';
 
 function fioTx(overrides: Partial<FioTransaction> = {}): FioTransaction {
   return {
@@ -26,6 +26,8 @@ function fioTx(overrides: Partial<FioTransaction> = {}): FioTransaction {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 describe('mapFioTransaction', () => {
@@ -140,5 +142,36 @@ describe('Fio API client', () => {
 
     await fetchNewTransactions('token-123');
     expect(fetchMock).toHaveBeenCalledWith('https://fioapi.fio.cz/v1/rest/last/token-123/transactions.json', expect.objectContaining({signal:expect.any(AbortSignal)}));
+  });
+});
+
+
+describe('Fio token activation errors', () => {
+  it('preserves a delayed bank 500 instead of hiding it behind a 20-second timeout', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms) => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new DOMException('Timed out', 'TimeoutError')), ms);
+      return controller.signal;
+    });
+    vi.stubGlobal('fetch', vi.fn((_url, options) => new Promise((resolve, reject) => {
+      options.signal.addEventListener('abort', () => reject(options.signal.reason));
+      setTimeout(() => resolve(new Response('inactive', {status: 500})), 30_400);
+    })));
+    const result = expect(fetchNewTransactions('test-token')).rejects.toBeInstanceOf(FioTokenInvalidOrInactive);
+    await vi.advanceTimersByTimeAsync(30_400);
+    await result;
+  });
+  it('recognizes a bank 500 explicitly forwarded by the authenticated proxy', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', {
+      status: 500, headers: {'x-fio-upstream-status': '500'},
+    })));
+    await expect(fetchNewTransactions('test-token', {url:'https://proxy.example',secret:'test'}))
+      .rejects.toMatchObject({code:'fio_token_invalid_or_inactive',status:500});
+  });
+  it('does not blame the token for a proxy-generated 500', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', {status:500})));
+    await expect(fetchNewTransactions('test-token', {url:'https://proxy.example',secret:'test'}))
+      .rejects.toBeInstanceOf(FioTransientFailure);
   });
 });

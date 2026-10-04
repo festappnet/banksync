@@ -281,3 +281,17 @@ polling, or authorize replay of another consumer's history.
 Canonical v2 transactions preserve bank-provided VS and payer reference without inferring an order identifier. Each consumer (Festapp, Mendelio, or another application) owns payment matching and business rules. The existing v1 RF-to-VS projection remains only as an explicit backwards-compatible adapter.
 
 Successful schema 11 Fio imports immediately sweep the canonical webhook outbox into the delivery queue, including retryable dispatch failures from earlier imports. Periodic reconciliation remains recovery; consumers do not wait for its next tick in the normal path.
+
+
+### Fio token authorization failures
+
+A newly created Fio token must also be authorized in Internetbanking; creating
+or copying it alone does not activate it. Fio documents HTTP 500 as a nonexistent
+or inactive token ([Fio API documentation](https://www.fio.cz/docs/cz/API_Bankovnictvi.pdf),
+section 8). An observed inactive token returned that response after 30.4 seconds.
+The client allows 55 seconds; an egress proxy should allow at least 45 seconds
+upstream and mark forwarded responses with `x-fio-upstream-status`. Only a direct
+or explicitly forwarded bank 500 becomes `fio_token_invalid_or_inactive`.
+Transport timeouts and proxy failures remain transient, not token diagnoses.
+Manual sync returns HTTP 422 with that stable error code, which is also stored
+in `api_last_error` and exposed by the owner-scoped account status endpoint.
