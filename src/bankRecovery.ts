@@ -42,7 +42,7 @@ export async function recoverBankAccount(db: D1Database, account: ApiFetchAccoun
     const end = new Date().toISOString().slice(0,10);
     const start = new Date(checkpoint?.api_reconciled_through ?? Date.parse(end) - 86*86400000);
     start.setUTCDate(start.getUTCDate()-3);
-    if (Date.parse(end) - start.getTime() > 89*86400000) throw new Error('recovery_window_requires_bank_unlock');
+    if (!open && Date.parse(end) - start.getTime() > 89*86400000) throw new Error('recovery_window_requires_bank_unlock');
     const batch = open ?? {id:crypto.randomUUID(),from_date:start.toISOString().slice(0,10),to_date:end,cipher:null,key_version:null};
     if (!open) await db.prepare(`INSERT INTO bank_recovery_batches(id,bank_account_id,from_date,to_date,state) VALUES(?,?,?,?,'fetching')`)
       .bind(batch.id,account.id,batch.from_date,batch.to_date).run();

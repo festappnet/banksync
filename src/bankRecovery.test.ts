@@ -106,13 +106,14 @@ describe('complete BankSync facts and recovery',()=>{
     await insertTransaction(db,{bank_account_id:account.id,payload:mapFioTransaction(raw())!});
     await expect(insertTransaction(db,{bank_account_id:account.id,payload:mapFioTransaction(raw('101','10.08'))!})).rejects.toThrow('bank_movement_fact_conflict');
   });
-  it('recovers after partial row insertion from encrypted spool without another bank fetch',async()=>{
+  it('recovers old encrypted spool after partial insertion without another bank fetch',async()=>{
     const {db,sqlite,account}=await setup();
     const fetch=vi.fn().mockResolvedValue(statement([raw(),raw('102')]));vi.stubGlobal('fetch',fetch);
     const prepare=db.prepare.bind(db);let inserts=0;
     db.prepare=((sql:string)=>{if(sql.includes('INSERT OR IGNORE INTO transactions') && ++inserts===2) throw new Error('disk_failure'); return prepare(sql);}) as typeof db.prepare;
     await expect(recoverBankAccount(db,account,env)).rejects.toThrow('disk_failure');
     expect(sqlite.prepare("SELECT state FROM bank_recovery_batches").get()).toEqual({state:'spooled'});
+    sqlite.exec("UPDATE bank_accounts SET api_reconciled_through=date('now','-120 days')");
     unlock(sqlite);db.prepare=prepare;
     expect(await recoverBankAccount(db,account,env)).toEqual({inserted:1,skipped:1});
     expect(fetch).toHaveBeenCalledTimes(1);
