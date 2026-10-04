@@ -136,12 +136,16 @@ describe('complete BankSync facts and recovery',()=>{
     release(statement());await first;
     expect(sqlite.prepare('SELECT count(*) AS n FROM transactions').get()).toEqual({n:1});
   });
-  it('quarantines a receiving account mismatch and a malformed row without closing the window',async()=>{
+  it('rejects a wrong-account snapshot and recovers after the token/account is corrected',async()=>{
     const {db,sqlite,account}=await setup();
-    vi.stubGlobal('fetch',vi.fn().mockResolvedValue(statement()));
-    await expect(recoverBankAccount(db,{...account,account_number:'9999/2010'},env)).rejects.toThrow('receiving_account_mismatch');
+    const fetch=vi.fn().mockImplementation(()=>statement());vi.stubGlobal('fetch',fetch);
+    await expect(recoverBankAccount(db,{...account,account_number:'9999/2010'},env))
+      .rejects.toMatchObject({code:'fio_receiving_account_mismatch',expectedAccount:'9999/2010',receivedAccount:'1234/2010'});
     expect(sqlite.prepare('SELECT count(*) AS n FROM transactions').get()).toEqual({n:0});
-    expect(sqlite.prepare('SELECT state FROM bank_recovery_batches').get()).toEqual({state:'spooled'});
+    expect(sqlite.prepare('SELECT state,cipher,key_version FROM bank_recovery_batches').get()).toEqual({state:'fetching',cipher:null,key_version:null});
+    unlock(sqlite);
+    expect(await recoverBankAccount(db,account,env)).toEqual({inserted:1,skipped:0});
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
   it('delivers all directions to v2 and only unchanged incoming shape to v1',async()=>{
     const {db,sqlite,account}=await setup();

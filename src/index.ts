@@ -29,6 +29,7 @@ export {
   FioRateLimited,
   FioTransientFailure,
   FioTokenInvalidOrInactive,
+  FioReceivingAccountMismatch,
   type FioColumn,
   type FioProxyConfig,
   type FioTransaction,
