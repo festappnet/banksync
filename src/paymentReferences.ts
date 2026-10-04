@@ -20,11 +20,11 @@ export async function referenceScope(db:D1Database,accountId:number,appId:string
  const row=await db.prepare('SELECT a.physical_account_id FROM account_aliases a JOIN payment_reference_grants g ON g.physical_account_id=a.physical_account_id WHERE a.bank_account_id=? AND g.app_id=?').bind(accountId,appId).first<{physical_account_id:string}>();if(!row)throw Error('reference_forbidden');return row.physical_account_id;
 }
 export async function lookupPaymentReference(db:D1Database,physical:string,app:string,source:string){return db.prepare('SELECT * FROM payment_references WHERE physical_account_id=? AND app_id=? AND source_ref=?').bind(physical,app,source).first<PaymentReference>();}
-// Unbiased cryptographic sampling in the complete 1-10 digit VS namespace.
+// Unbiased cryptographic ten-digit symbols; requested symbols still accept 1-10 digits.
 function randomVariableSymbol(){
  // Accept only the ten equally likely byte values 0-9; no biased reduction.
  const digits:string[]=[];
- for(;;){for(const value of crypto.getRandomValues(new Uint8Array(32))){if(value>=10)continue;digits.push(String(value));if(digits.length===10){const symbol=digits.join('').replace(/^0+/,'');if(symbol)return symbol;digits.length=0;}}}
+ for(;;){for(const value of crypto.getRandomValues(new Uint8Array(32))){if(value>=10||(digits.length===0&&value===0))continue;digits.push(String(value));if(digits.length===10){return digits.join('');}}}
 }
 export async function reservePaymentReference(db:D1Database,physical:string,app:string,source:string,payloadHash:string,legacyVs?:string,importHistorical=false):Promise<PaymentReference>{
  if(!source||source.length>255||!/^[a-f0-9]{64}$/.test(payloadHash))throw Error('reference_invalid');
