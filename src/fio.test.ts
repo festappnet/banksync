@@ -169,6 +169,13 @@ describe('Fio token activation errors', () => {
     await expect(fetchNewTransactions('test-token', {url:'https://proxy.example',secret:'test'}))
       .rejects.toMatchObject({code:'fio_token_invalid_or_inactive',status:500});
   });
+  it('preserves the bank error through gateways that mask upstream 5xx responses', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{"error":"fio_token_invalid_or_inactive"}', {
+      status: 422, headers: {'x-fio-upstream-status': '500'},
+    })));
+    await expect(fetchNewTransactions('test-token', {url:'https://proxy.test',secret:'test-secret'}))
+      .rejects.toMatchObject({code:'fio_token_invalid_or_inactive',status:500});
+  });
   it('does not blame the token for a proxy-generated 500', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', {status:500})));
     await expect(fetchNewTransactions('test-token', {url:'https://proxy.example',secret:'test'}))
