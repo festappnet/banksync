@@ -90,7 +90,7 @@ function retryAfterSeconds(headers: Headers): number | null {
 }
 
 async function ensureFioResponse(res: Response, proxy?: FioProxyConfig): Promise<void> {
-  if (res.status === 500 && (!proxy || res.headers.get("x-fio-upstream-status") === "500")) {
+  if ((res.status === 500 && !proxy) || (proxy && [422, 500].includes(res.status) && res.headers.get("x-fio-upstream-status") === "500")) {
     throw new FioTokenInvalidOrInactive();
   }
   if (res.status === 429 || res.status === 409) {
