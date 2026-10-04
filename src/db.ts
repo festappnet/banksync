@@ -9,7 +9,7 @@ import { resolveVariableSymbol } from './referenceCandidates';
 // (8) and the contract-cleanup schema (9). Two adjacent versions so neither
 // deploy order (code-before-migration or migration-before-code) causes a global
 // 503. Older expand versions (6, 7) are gone from every environment.
-const SUPPORTED_SCHEMA_VERSIONS = ['10', '11'] as const;
+const SUPPORTED_SCHEMA_VERSIONS = ['10', '11', '12'] as const;
 type SupportedSchemaVersion = (typeof SUPPORTED_SCHEMA_VERSIONS)[number];
 
 const _checkedDbs = new Set<D1Database>();
@@ -502,7 +502,7 @@ export async function insertTransaction(db: D1Database, args: {
   payload: Omit<Transaction, 'id' | 'bank_account_id'>;
 }): Promise<InsertResult> {
   const schema = await db.prepare(`SELECT value FROM schema_meta WHERE key='version'`).first<{value: string}>();
-  const v2 = schema?.value === '11';
+  const v2 = ['11','12'].includes(schema?.value??'');
   const p = {
     ...args.payload,
     vs: v2 ? (args.payload.raw_vs ?? args.payload.vs ?? null) : resolveVariableSymbol(args.payload),

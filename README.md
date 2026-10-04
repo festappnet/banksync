@@ -295,3 +295,33 @@ or explicitly forwarded bank 500 becomes `fio_token_invalid_or_inactive`.
 Transport timeouts and proxy failures remain transient, not token diagnoses.
 Manual sync returns HTTP 422 with that stable error code, which is also stored
 in `api_last_error` and exposed by the owner-scoped account status endpoint.
+
+## Optional payment references (schema 12)
+
+`migrations/0012_payment_references.sql` adds a permanent physical-account registry.
+The existing v2 import/delivery pipeline remains active on schemas 11 and 12.
+Tenant `GET /bank-accounts/:id/account-health` requires ownership or an active
+subscription and is independent of optional reference enrollment. Health reports
+fresh successful import observation, not an invented completeness watermark.
+
+Reference enrollment requires an admin to map aliases to a canonical CZ IBAN,
+grant the consumer, import known historical symbols and explicitly activate with
+`registry_verified:true`. The registry starts locked and backups restore it locked.
+Admin `POST /bank-accounts/:id/payment-reference-admin` supports `grant`, `import`
+and `activate`; historical import uses `vs`. A collision during import is recorded
+and locks further allocation until an operator resolves the inventory.
+
+Enrolled tenants `POST /bank-accounts/:id/payment-references` with `source_ref` and
+`payload_hash` to reserve a cryptographically random unique symbol, optionally requesting `variable_symbol` (1-10 digits).
+`GET` with `source_ref` retrieves only the caller's reservation. The same immutable
+command returns the same reservation; a different command or requested symbol
+collides with 409 `reference_conflict`. Leading zeros share a namespace. A requested
+symbol already held for another purpose is rejected without replacement, overwriting
+history or locking unrelated runtime reservations. Allocated symbols never expire
+or get reused, and account deletion/recreation does not erase physical identity.
+
+This capability is optional. Its uniqueness guarantee covers enrolled/imported
+references, not independently generated symbols in other applications. No external
+allocator is automatically migrated and payment-reference use never implies a new
+BankSync instance or bank import. `pnpm check` includes transactional SQLite cases
+for concurrency/idempotency, scope, aliases, collisions and exhaustion.

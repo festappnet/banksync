@@ -1,3 +1,4 @@
+import {canonicalIban,mapPhysicalAccount,referenceScope,reservePaymentReference,lookupPaymentReference} from './paymentReferences';
 import type {
   D1Database,
   ExecutionContext,
@@ -227,7 +228,7 @@ export async function processEmail(
     const pairingCode = extractPairingCode(identity.recipient);
     const account = pairingCode ? await findBankAccountByPairingCode(env.DB, pairingCode) : null;
     const schema = await env.DB.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
-    if (account && schema?.value === '11') {
+    if (account && ['11','12'].includes(schema?.value??'')) {
       spoolId = await sha256Hex(`${account.id}:${extracted.messageId ?? await sha256Hex(rawMime)}`);
       const digest = await sha256Hex(rawMime);
       const encrypted = await encryptSecret(JSON.stringify({bytesBase64,envelope}),env);
@@ -240,7 +241,7 @@ export async function processEmail(
       if(spoolId) await env.DB.prepare("UPDATE authenticated_email_spool SET state='completed',completed_at=datetime('now') WHERE id=?").bind(spoolId).run();
       if(r2SpoolKey) await env.BACKUPS!.delete(r2SpoolKey);
     }
-    if (account && schema?.value==='11') {
+    if (account && ['11','12'].includes(schema?.value??'')) {
       const enabled=await env.DB.prepare('SELECT ingest_enabled FROM bank_accounts WHERE id=?').bind(account.id).first<{ingest_enabled:number}>();
       if(enabled?.ingest_enabled===0) throw new Error('email_connection_paused');
     }
@@ -431,7 +432,7 @@ async function runBankApiSync(env: Env, account: ApiFetchAccount): Promise<BankA
   const isBackfill = !account.api_backfill_done;
   try {
     const schema = await env.DB.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
-    if(schema?.value === '11') {
+    if(['11','12'].includes(schema?.value??'')) {
       const result=await recoverBankAccount(env.DB,account,env,fioProxyConfig(env));
       const delivery=await createWebhookDeliveryCoordinator(env).sweep();
       return {bank_account_id:account.id,provider:account.account_type,inserted:result.inserted,skipped_duplicate:result.skipped,skipped_outgoing:0,parse_errors:0,queued_webhooks:delivery.queued,backfill:isBackfill,deferred:false};
@@ -894,6 +895,41 @@ async function dispatch(
   bodyText: string,
 ): Promise<Response> {
 
+  const referenceRoute=url.pathname.match(/^\/bank-accounts\/(\d+)\/(payment-references|payment-reference-admin|account-health)$/);
+  if(referenceRoute){
+    const version=await env.DB.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
+    if(version?.value!=='12')return jsonResponse({error:'schema12_required'},409);
+    const accountId=Number(referenceRoute[1]);
+    try {
+      if(referenceRoute[2]==='payment-reference-admin'&&req.method==='POST'){
+        if(authCtx.type!=='admin')return forbidden();
+        const input=JSON.parse(bodyText),physical=await mapPhysicalAccount(env.DB,accountId);
+        if(input.op==='grant'&&typeof input.app_id==='string'){
+          if(!await findConsumerByAppId(env.DB,input.app_id))return jsonResponse({error:'unknown_consumer'},404);
+          await env.DB.prepare('INSERT INTO payment_reference_grants VALUES(?,?) ON CONFLICT DO NOTHING').bind(physical,input.app_id).run();return jsonResponse({ok:true,physical_account_id:physical});
+        }
+        if(input.op==='activate'&&input.registry_verified===true){
+          if(await env.DB.prepare('SELECT 1 FROM payment_reference_conflicts WHERE physical_account_id=? LIMIT 1').bind(physical).first())return jsonResponse({error:'reference_conflict'},409);
+          await env.DB.prepare('UPDATE physical_accounts SET allocation_enabled=1 WHERE id=?').bind(physical).run();return jsonResponse({ok:true});
+        }
+        if(input.op==='import')return jsonResponse(await reservePaymentReference(env.DB,physical,input.app_id,input.source_ref,input.payload_hash,input.vs,true));
+        return jsonResponse({error:'invalid_operation'},400);
+      }
+      if(authCtx.type!=='tenant')return forbidden();
+      if(referenceRoute[2]==='account-health'&&req.method==='GET'){
+        const owned=await findBankAccountById(env.DB,accountId);if(!owned)return jsonResponse({error:'not_found'},404);
+        if(owned.owner_app_id!==authCtx.app_id&&!await env.DB.prepare('SELECT 1 FROM webhook_subscriptions WHERE bank_account_id=? AND consumer_app_id=? AND deleted_at IS NULL').bind(accountId,authCtx.app_id).first())return forbidden();
+        const row=await env.DB.prepare('SELECT api_fetch_enabled,api_last_success_at,api_last_error,ingest_enabled FROM bank_accounts WHERE id=?').bind(accountId).first<{api_fetch_enabled:number;api_last_success_at:string|null;api_last_error:string|null;ingest_enabled:number}>();
+        const stamp=row?.api_last_success_at,observed=stamp?Date.parse(/(?:Z|[+-]\d\d:\d\d)$/.test(stamp)?stamp:stamp+'Z'):NaN;
+        const healthy=!!row?.ingest_enabled&&!!row.api_fetch_enabled&&!row.api_last_error&&Number.isFinite(observed)&&Date.now()-observed<10*60*1000;
+        return jsonResponse({physical_account_id:await sha256Hex(canonicalIban(owned.account_number)),bank_observation_status:healthy?'healthy':row?.api_last_error?'degraded':'unknown',last_success_at:stamp??null,bank_observed_through:null});
+      }
+      const physical=await referenceScope(env.DB,accountId,authCtx.app_id);
+      if(req.method==='GET'){const result=await lookupPaymentReference(env.DB,physical,authCtx.app_id,url.searchParams.get('source_ref')??'');return result?jsonResponse(result):jsonResponse({error:'not_found'},404);}
+      if(req.method==='POST'){const input=JSON.parse(bodyText);if(input.vs!==undefined||input.variable_symbol!==undefined&&typeof input.variable_symbol!=='string')return jsonResponse({error:'invalid_variable_symbol'},400);return jsonResponse(await reservePaymentReference(env.DB,physical,authCtx.app_id,input.source_ref,input.payload_hash,input.variable_symbol),201);}
+    }catch(error){const code=error instanceof Error?error.message:'reference_unavailable';return jsonResponse({error:code},code==='reference_forbidden'?403:code==='reference_invalid'||code==='invalid_iban'?400:409);}
+    return jsonResponse({error:'not_found'},404);
+  }
   // POST /bank-accounts
   if (url.pathname === '/bank-accounts' && req.method === 'POST') {
     const input = parseOr400(CreateBankAccountSchema, bodyText);
@@ -909,8 +945,8 @@ async function dispatch(
       return jsonResponse({ error: 'fio_api_token_supported_only_for_fio' }, 400);
     }
     const expanded=await env.DB.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
-    if(input.ingest_enabled===false && expanded?.value!=='11') return jsonResponse({error:'paused_ingest_requires_schema11'},409);
-    const capability=expanded?.value==='11' ? await env.DB.prepare('SELECT event_version FROM webhook_consumers WHERE app_id=?').bind(input.owner_app_id).first<{event_version:string}>() : null;
+    if(input.ingest_enabled===false && !['11','12'].includes(expanded?.value??'')) return jsonResponse({error:'paused_ingest_requires_schema11'},409);
+    const capability=['11','12'].includes(expanded?.value??'') ? await env.DB.prepare('SELECT event_version FROM webhook_consumers WHERE app_id=?').bind(input.owner_app_id).first<{event_version:string}>() : null;
     if(capability?.event_version==='2' && (input.ingest_mode==='email'||input.ingest_mode==='both') && (env.AUTHENTICATED_EMAIL_SPOOL!=='on'||!env.BACKUPS)) return jsonResponse({error:'durable_email_capability_not_configured'},503);
     if(capability?.event_version==='2' && input.ingest_mode==='both') return jsonResponse({error:'both_requires_verified_correlation'},409);
     const pairingCode = await generateUniquePairingCode(env.DB);
@@ -946,7 +982,7 @@ async function dispatch(
 
     const schemaVersion = await env.DB.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
     if (input.ingest_enabled === false) {
-      if (schemaVersion?.value !== '11') throw new Error('paused_ingest_requires_schema11');
+      if (!['11','12'].includes(schemaVersion?.value??'')) throw new Error('paused_ingest_requires_schema11');
       await env.DB.prepare('UPDATE bank_accounts SET ingest_enabled=0,api_fetch_enabled=0 WHERE id=?').bind(account.id).run();
     }
     // Best-path CF provision (stamp outbox with the real id + synchronous rule
@@ -1036,7 +1072,7 @@ async function dispatch(
     const existing=await requireOwnedAccount(env,id,authCtx);
     if(existing instanceof Response) return existing;
     const schema=await env.DB.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
-    if(schema?.value!=='11') return jsonResponse({error:'schema11_required'},409);
+    if(!['11','12'].includes(schema?.value??'')) return jsonResponse({error:'schema11_required'},409);
     if(req.method==='PUT') {
       let input; try {input=JSON.parse(bodyText);} catch{return jsonResponse({error:'invalid_json'},400);}
       if(typeof input.enabled!=='boolean') return jsonResponse({error:'enabled_required'},400);
@@ -1072,7 +1108,7 @@ async function dispatch(
       });
       if (!updated) return jsonResponse({ error: 'not_found' }, 404);
       const schemaVersion=await env.DB.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
-      if(schemaVersion?.value==='11') await env.DB.prepare('UPDATE bank_accounts SET api_token_hash=? WHERE id=?').bind(await sha256Hex(rawToken),id).run();
+      if(['11','12'].includes(schemaVersion?.value??'')) await env.DB.prepare('UPDATE bank_accounts SET api_token_hash=? WHERE id=?').bind(await sha256Hex(rawToken),id).run();
       log('bank_account_api_token_updated', { bank_account_id: id, account_type: existing.account_type, api_token_prefix: updated.api_token_prefix });
       return jsonResponse(updated);
     }
@@ -1177,7 +1213,7 @@ async function dispatch(
     const input = parseOr400(CreateConsumerSchema, bodyText);
     if (input instanceof Response) return input;
     const schemaVersion=await env.DB.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
-    if(input.event_version==='2' && schemaVersion?.value!=='11') return jsonResponse({error:'v2_requires_schema11'},409);
+    if(input.event_version==='2' && !['11','12'].includes(schemaVersion?.value??'')) return jsonResponse({error:'v2_requires_schema11'},409);
     let callbackUrl: string;
     try {
       callbackUrl = validateCallbackUrl(input.callback_url, { environment: env.ENV, allowlist: env.CALLBACK_HOST_ALLOWLIST });
@@ -1603,7 +1639,7 @@ export default {
         await env.DB.prepare("INSERT INTO schema_meta(key,value) VALUES('email_spool_cursor',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(page.truncated?page.cursor:'').run();
       }
       const schema = await env.DB.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
-      if(schema?.value==='11') {
+      if(['11','12'].includes(schema?.value??'')) {
         const pending = await env.DB.prepare("SELECT id,cipher,key_version FROM authenticated_email_spool WHERE state='pending' ORDER BY attempts,created_at LIMIT 10").all<{id:string;cipher:string;key_version:number}>();
         for(const row of pending.results) {
           try {

@@ -41,3 +41,5 @@ export type {
   WebhookConsumer,
   WebhookSubscription,
 } from "./types.js";
+
+export {normalizeVs,canonicalIban,type PaymentReference} from './paymentReferences.js';
