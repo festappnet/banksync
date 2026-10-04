@@ -1,7 +1,7 @@
 import type { D1Database } from '@cloudflare/workers-types';
 import type { ApiFetchAccount } from './types';
 import { decryptSecret, encryptSecret, type VersionedSecretEnv } from './crypto';
-import { fetchFioStatement, mapFioTransaction, type FioProxyConfig } from './fio';
+import { fetchFioStatement, FioReceivingAccountMismatch, mapFioTransaction, type FioProxyConfig } from './fio';
 import { insertTransaction } from './db';
 import { sha256Hex } from './idempotency';
 
@@ -61,7 +61,13 @@ export async function recoverBankAccount(db: D1Database, account: ApiFetchAccoun
     const identity = String(statement.info?.iban ?? '').replace(/\s/g,'').toUpperCase();
     const domestic = `${statement.info?.accountId ?? ''}/${statement.info?.bankId ?? ''}`;
     const expected = account.account_number.replace(/\s/g,'').toUpperCase();
-    if (expected !== identity && expected !== domestic) throw new Error('fio_receiving_account_mismatch');
+    if (expected !== identity && expected !== domestic) {
+      // No rows from this statement have been imported. Do not let a wrong-account
+      // snapshot permanently poison retries after the user supplies the correct token.
+      await db.prepare("UPDATE bank_recovery_batches SET cipher=NULL,key_version=NULL,state='fetching' WHERE id=?")
+        .bind(batch.id).run();
+      throw new FioReceivingAccountMismatch(expected, identity || domestic);
+    }
     let inserted=0, skipped=0;
     for (const raw of statement.transactions) {
       await renew();

@@ -30,6 +30,14 @@ export class FioTokenInvalidOrInactive extends FioApiError {
   }
 }
 
+export class FioReceivingAccountMismatch extends Error {
+  readonly code = 'fio_receiving_account_mismatch';
+  constructor(readonly expectedAccount: string, readonly receivedAccount: string) {
+    super('fio_receiving_account_mismatch');
+    this.name = 'FioReceivingAccountMismatch';
+  }
+}
+
 export class FioRateLimited extends FioApiError {
   constructor(status: number, public readonly retryAfterS: number | null) {
     super(`Fio API ${status}`, status);
