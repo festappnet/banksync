@@ -279,3 +279,5 @@ Publishing this package does not deploy the shared Worker, mutate D1, enable ban
 polling, or authorize replay of another consumer's history.
 
 Canonical v2 transactions preserve bank-provided VS and payer reference without inferring an order identifier. Each consumer (Festapp, Mendelio, or another application) owns payment matching and business rules. The existing v1 RF-to-VS projection remains only as an explicit backwards-compatible adapter.
+
+Successful schema 11 Fio imports immediately sweep the canonical webhook outbox into the delivery queue, including retryable dispatch failures from earlier imports. Periodic reconciliation remains recovery; consumers do not wait for its next tick in the normal path.

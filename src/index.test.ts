@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { D1Database, D1Result, D1PreparedStatement, Queue, ScheduledEvent, ExecutionContext } from '@cloudflare/workers-types';
 import { resetSchemaCheckCache } from './db';
+import { encryptSecret } from './crypto';
 import type { Env } from './cloudflare';
 import { processEmail as processEmailWithEnvelope } from './cloudflare';
 import type { WebhookQueueMessage } from './queue';
@@ -56,7 +57,7 @@ function wrapAsD1(sqlite: Database.Database): D1Database {
     return stmt;
   }
 
-  return { prepare } as unknown as D1Database;
+  return { prepare, async batch(statements: D1PreparedStatement[]) { return Promise.all(sqlite.transaction(() => statements.map(statement=>statement.run()))()); } } as unknown as D1Database;
 }
 
 function makeTestDb(): { db: D1Database; sqlite: Database.Database } {
@@ -1967,5 +1968,44 @@ describe('authenticated encrypted email spool',()=>{
     const {pairingCode}=await seedFullSetup(db,sqlite);
     await processEmail(makeStream(buildFioEmail(`${pairingCode}@banksync.festapp.net`).replace('dmarc=pass','dmarc=fail').replace('dkim=pass','dkim=fail')),env);
     expect(storage.objects.size).toBe(0);expect(sqlite.prepare('SELECT count(*) AS n FROM transactions').get()).toEqual({n:0});
+  });
+});
+
+
+describe('schema11 immediate webhook dispatch',()=>{
+  beforeEach(()=>resetSchemaCheckCache());
+  afterEach(()=>vi.unstubAllGlobals());
+  async function setup(queueSend=vi.fn()) {
+    const {db,sqlite}=makeTestDb();const env=makeEnv(db,queueSend);
+    const {accountId,appId}=await seedFullSetup(db,sqlite);
+    sqlite.exec(readFileSync(resolve(__dirname,'../migrations/0011_complete_bank_facts.sql'),'utf8'));
+    sqlite.prepare('UPDATE webhook_consumers SET event_version=? WHERE app_id=?').run('2',appId);
+    const encrypted=await encryptSecret('synthetic-fixture-token',env);
+    sqlite.prepare("UPDATE bank_accounts SET ingest_mode='api',api_token_cipher=?,api_token_key_ver=?,api_fetch_enabled=1,api_backfill_done=1 WHERE id=?")
+      .run(encrypted.cipher,encrypted.keyVersion,accountId);
+    vi.stubGlobal('fetch',vi.fn(async()=>new Response(JSON.stringify({accountStatement:{info:{accountId:'123456',bankId:'2010',currency:'CZK'},
+      transactionList:{transaction:[{...fioApiTx('990001'),column0:{value:new Date().toISOString().slice(0,10)}}]}}}))));
+    return {db,sqlite,env,accountId,queueSend};
+  }
+  it('queues a new v2 webhook before manual import returns without a cron tick',async()=>{
+    const {env,accountId,queueSend}=await setup();
+    const response=await adminReq('POST',`/bank-accounts/${accountId}/fio-sync`,env);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({inserted:1,queued_webhooks:1});
+    expect(queueSend).toHaveBeenCalledOnce();
+    expect(queueSend.mock.calls[0]![0].envelope.event_version).toBe('2');
+  });
+  it('keeps failed dispatch durable and re-drives it during the next import without duplicating the bank fact',async()=>{
+    const queueSend=vi.fn().mockRejectedValueOnce(new Error('queue_unavailable')).mockResolvedValue(undefined);
+    const {env,sqlite,accountId}=await setup(queueSend);
+    const first=await adminReq('POST',`/bank-accounts/${accountId}/fio-sync`,env);
+    expect(first.status).toBe(200);
+    expect(await first.json()).toMatchObject({inserted:1,queued_webhooks:0});
+    sqlite.exec("UPDATE bank_poll_leases SET next_allowed_at=datetime('now','-31 seconds'),lease_until=datetime('now','-31 seconds'); UPDATE webhook_delivery_jobs SET next_attempt_at=datetime('now','-31 seconds')");
+    const retry=await adminReq('POST',`/bank-accounts/${accountId}/fio-sync`,env);
+    expect(retry.status).toBe(200);
+    expect(await retry.json()).toMatchObject({inserted:0,skipped_duplicate:1,queued_webhooks:1});
+    expect(sqlite.prepare('SELECT count(*) AS n FROM transactions').get()).toEqual({n:1});
+    expect(queueSend).toHaveBeenCalledTimes(2);
   });
 });
