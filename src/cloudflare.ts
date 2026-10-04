@@ -433,8 +433,8 @@ async function runBankApiSync(env: Env, account: ApiFetchAccount): Promise<BankA
     const schema = await env.DB.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
     if(schema?.value === '11') {
       const result=await recoverBankAccount(env.DB,account,env,fioProxyConfig(env));
-      await ensureDeliveryJobs(env.DB);
-      return {bank_account_id:account.id,provider:account.account_type,inserted:result.inserted,skipped_duplicate:result.skipped,skipped_outgoing:0,parse_errors:0,queued_webhooks:0,backfill:isBackfill,deferred:false};
+      const delivery=await createWebhookDeliveryCoordinator(env).sweep();
+      return {bank_account_id:account.id,provider:account.account_type,inserted:result.inserted,skipped_duplicate:result.skipped,skipped_outgoing:0,parse_errors:0,queued_webhooks:delivery.queued,backfill:isBackfill,deferred:false};
     }
     const token = await decryptSecret(account.api_token_cipher, account.api_token_key_ver, env);
     if (isBackfill && account.api_last_success_at === null) {
