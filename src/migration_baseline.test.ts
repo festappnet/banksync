@@ -51,3 +51,18 @@ describe('canonical D1 baseline', () => {
     expect(schema(upgraded)).toEqual(schema(fresh));
   });
 });
+
+
+it('schema 11 preserves archived payload bytes and the high ID watermark after retention', () => {
+  const db=new Database(':memory:');db.exec(readFileSync(resolve(__dirname,'../migrations/0001_schema.sql'),'utf8'));
+  db.exec("INSERT INTO bank_accounts(id,account_number,pairing_code) VALUES(1,'1234/2010','0123456789')");
+  db.exec("INSERT INTO transactions(id,bank_account_id,amount_cents,currency,source,date,transaction_id) VALUES(5000,1,1000,'CZK','email','2026-01-01','777')");
+  db.exec("INSERT INTO webhook_delivery_jobs(transaction_id,consumer_app_id,event_kind,delivery_id,payload,status,next_attempt_at) VALUES(5000,'dating','transaction.received','01K00000000000000000000001','archived exact bytes','delivered',datetime('now'))");
+  db.exec('DELETE FROM transactions');
+  const before=db.prepare('SELECT payload FROM webhook_delivery_jobs').get();
+  db.exec(readFileSync(resolve(__dirname,'../migrations/0011_complete_bank_facts.sql'),'utf8'));
+  db.exec("INSERT INTO transactions(bank_account_id,amount_cents,currency,source,date) VALUES(1,-1000,'EUR','fio_api','2026-10-04')");
+  expect(db.prepare('SELECT id FROM transactions').get()).toEqual({id:5001});
+  expect(db.prepare('SELECT payload FROM webhook_delivery_jobs').get()).toEqual(before);
+  expect(db.prepare("SELECT name FROM sqlite_schema WHERE name='idx_tx_fuzzy_same_day'").get()).toBeUndefined();
+});

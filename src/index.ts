@@ -5,7 +5,7 @@ export {
   type EmailProvider,
   type ParsedEmailTransaction,
 } from "./parser.js";
-export { normalizeCurrency, toCents } from "./normalize.js";
+export { normalizeCurrency, toCents, decimalToCents } from "./normalize.js";
 export {
   extractReferenceCandidates,
   resolveVariableSymbol,

@@ -1,5 +1,5 @@
 import type { Transaction } from './types.js';
-import { normalizeCurrency, toCents } from './normalize.js';
+import { normalizeCurrency, toCents, decimalToCents } from './normalize.js';
 
 export const BANK_CODES: Record<string, string> = {
   '0100': 'Komerční banka, a.s.',
@@ -247,9 +247,9 @@ export function parseEmail(
     const amount = parseAmount(amountField.rawAmount);
     if (isNaN(amount)) return null;
     // Incoming-only: negative amount → return null (caller logs outgoing_filtered)
-    if (amount < 0) return null;
 
-    const amount_cents = toCents(amount, currency);
+
+    const amount_cents = decimalToCents(amountField.rawAmount, currency);
 
     const accountMatch = text.match(/(?:Protiúčet|Protiucet|Account):\s*([0-9\/\s]+)/i);
     const vsMatch = text.match(/VS:\s*([0-9]+)/i);
@@ -257,7 +257,8 @@ export function parseEmail(
     const ssMatch = text.match(/SS:\s*([0-9]+)/i);
     const msgMatch = text.match(/(?:Zpráva pro příjemce|Message):\s*(.*)/i);
     const nameMatch = text.match(/(?:Název protiúčtu|Account Name):\s*(.*)/i);
-    const idMatch = text.match(/(?:ID pokynu|Transaction ID):\s*([0-9]+)/i);
+    const commandMatch = text.match(/ID pokynu:\s*([0-9]+)/i);
+    const idMatch = text.match(/ID pohybu:\s*([0-9]+)/i);
 
     // Extract date from body; Fio emails often include "Datum: dd.mm.yyyy hh:mm"
     const dateMatch = text.match(
@@ -292,11 +293,16 @@ export function parseEmail(
       transaction_type: null,
       performed_by: null,
       comment: null,
-      command_id: null,
+      payer_reference: null,
+      raw_vs: vsMatch ? (vsMatch[1] ?? null) : null,
+      direction: amount_cents > 0 ? 'incoming' : amount_cents < 0 ? 'outgoing' : 'zero',
+      identity_kind: 'observation',
+      identity_provenance: 'authenticated_email_unverified_movement',
+      command_id: commandMatch ? (commandMatch[1] ?? null) : null,
       source: 'email',
       date,
       date_offset_min,
-      transaction_id: idMatch ? (idMatch[1] ?? null) : null,
+      transaction_id: null,
       external_id: null,
     } satisfies ParsedEmailTransaction;
   }
@@ -312,9 +318,9 @@ export function parseEmail(
     if (!amountStr) return null;
     const amount = parseAmount(amountField.rawAmount);
     if (isNaN(amount)) return null;
-    if (amount < 0) return null;
 
-    const amount_cents = toCents(amount, currency);
+
+    const amount_cents = decimalToCents(amountField.rawAmount, currency);
 
     // AirBank: "z účtu Name Name číslo 123/2010" or "z účtu 123/2010"
     const counterparty = parseAirbankCounterparty(text);
@@ -359,6 +365,11 @@ export function parseEmail(
       transaction_type: null,
       performed_by: null,
       comment: null,
+      payer_reference: null,
+      raw_vs: vsMatch ? (vsMatch[1] ?? null) : null,
+      direction: amount_cents > 0 ? 'incoming' : amount_cents < 0 ? 'outgoing' : 'zero',
+      identity_kind: 'observation',
+      identity_provenance: 'authenticated_email_unverified_movement',
       command_id: null,
       source: 'email',
       date,

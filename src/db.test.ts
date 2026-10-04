@@ -80,7 +80,7 @@ function wrapAsD1(sqlite: Database.Database): D1Database {
   return { prepare } as unknown as D1Database;
 }
 
-const MIGRATIONS = ['0001_schema.sql'];
+const MIGRATIONS = ['0001_schema.sql','0011_complete_bank_facts.sql'];
 
 function applyMigrations(sqlite: Database.Database): void {
   for (const m of MIGRATIONS) {
@@ -213,7 +213,7 @@ describe('insertTransaction', () => {
     }
   });
 
-  it('persists the VS decoded from a checksum-valid RF before webhook delivery', async () => {
+  it('preserves bank VS without promoting an RF reference into canonical facts', async () => {
     const db = makeTestDb();
     const acct = await createBankAccount(db, { account_number: '1234/2010', pairing_code: 'code0001' });
     const result = await insertTransaction(db, {
@@ -227,7 +227,8 @@ describe('insertTransaction', () => {
 
     expect(result.status).toBe('inserted');
     if (result.status === 'inserted') {
-      expect(result.transaction.vs).toBe('0000000001');
+      expect(result.transaction.vs).toBeNull();
+      expect(result.transaction.message).toBe(`SEPA reference ${encodeRf('0000000001')}`);
     }
   });
 
@@ -267,17 +268,17 @@ describe('insertTransaction', () => {
     const acct = await createBankAccount(db, { account_number: '1234/2010', pairing_code: 'code0001' });
     await insertTransaction(db, {
       bank_account_id: acct.id,
-      payload: txPayload({ transaction_id: 'fio-tx-001', external_id: 'msg-a' }),
+      payload: txPayload({ source: 'fio_api', transaction_id: 'fio-tx-001', external_id: 'msg-a' }),
     });
     const result = await insertTransaction(db, {
       bank_account_id: acct.id,
-      payload: txPayload({ transaction_id: 'fio-tx-001', external_id: 'msg-b' }),
+      payload: txPayload({ source: 'fio_api', transaction_id: 'fio-tx-001', external_id: 'msg-b' }),
     });
     expect(result.status).toBe('skipped');
     expect((result as { status: 'skipped'; reason: string }).reason).toBe('duplicate_transaction_id');
   });
 
-  it('layer 3 dedup: email/API fuzzy duplicate on same day', async () => {
+  it('preserves independent movements with equal VS, amount and day', async () => {
     const db = makeTestDb();
     const acct = await createBankAccount(db, { account_number: '1234/2010', pairing_code: 'code0001' });
     await insertTransaction(db, {
@@ -288,11 +289,10 @@ describe('insertTransaction', () => {
       bank_account_id: acct.id,
       payload: txPayload({ source: 'fio_api', transaction_id: 'fio-1', external_id: null, vs: '12345', amount_cents: 1990, currency: 'CZK', date: '2026-05-08T12:00:00.000Z' }),
     });
-    expect(result.status).toBe('skipped');
-    expect((result as { status: 'skipped'; reason: string }).reason).toBe('fuzzy_duplicate');
+    expect(result.status).toBe('inserted');
   });
 
-  it('layer 3 dedup: email/API fuzzy duplicate with date shift', async () => {
+  it('preserves independent movements with equal VS and amount two days apart', async () => {
     const db = makeTestDb();
     const acct = await createBankAccount(db, { account_number: '1234/2010', pairing_code: 'code0001' });
     await insertTransaction(db, {
@@ -303,8 +303,7 @@ describe('insertTransaction', () => {
       bank_account_id: acct.id,
       payload: txPayload({ source: 'fio_api', transaction_id: 'fio-1', external_id: null, vs: '12345', amount_cents: 1990, currency: 'CZK', date: '2026-05-10T12:00:00.000Z' }),
     });
-    expect(result.status).toBe('skipped');
-    expect((result as { status: 'skipped'; reason: string }).reason).toBe('fuzzy_duplicate');
+    expect(result.status).toBe('inserted');
   });
 
   it('same transaction_id on different bank_account is NOT a duplicate', async () => {
@@ -313,11 +312,11 @@ describe('insertTransaction', () => {
     const acct2 = await createBankAccount(db, { account_number: '2222/2010', pairing_code: 'code0002' });
     await insertTransaction(db, {
       bank_account_id: acct1.id,
-      payload: txPayload({ transaction_id: 'fio-tx-001', external_id: null }),
+      payload: txPayload({ source: 'fio_api', transaction_id: 'fio-tx-001', external_id: null }),
     });
     const result = await insertTransaction(db, {
       bank_account_id: acct2.id,
-      payload: txPayload({ transaction_id: 'fio-tx-001', external_id: null }),
+      payload: txPayload({ source: 'fio_api', transaction_id: 'fio-tx-001', external_id: null }),
     });
     expect(result.status).toBe('inserted');
   });

@@ -1,3 +1,4 @@
+import { resolveVariableSymbol } from './referenceCandidates';
 import type { Transaction, WebhookEnvelope } from './types';
 
 export interface SignedWebhook {
@@ -31,13 +32,20 @@ export function buildWebhookEnvelope(args: {
   delivery_id: string;
   pairing_code: string;
   transaction: Transaction;
+  event_version?: '1' | '2';
 }): WebhookEnvelope {
+  const keys = ['id','bank_account_id','amount_cents','currency','counter_account','bank_code','bank_name','vs','ks','ss','message','sender_name','user_identification','transaction_type','performed_by','comment','command_id','source','date','date_offset_min','transaction_id','external_id'];
+  if(args.event_version==='2') keys.push('payer_reference','raw_vs','direction','identity_kind','identity_provenance');
+  const data = Object.fromEntries(keys.map(key=>[key,(args.transaction as unknown as Record<string,unknown>)[key]])) as unknown as Transaction;
+  // Preserve the legacy v1 projection without rewriting the canonical bank facts.
+  if (args.event_version !== '2') data.vs = resolveVariableSymbol(args.transaction);
+  if (args.event_version !== '2' && data.amount_cents <= 0) throw new Error('v1_incoming_only');
   return {
     event: 'transaction.received',
-    event_version: '1',
+    event_version: args.event_version ?? '1',
     delivery_id: args.delivery_id,
     pairing_code: args.pairing_code,
-    data: args.transaction,
+    data,
   };
 }
 
@@ -104,6 +112,8 @@ export interface VerifyWebhookArgs {
   signature: string;
   toleranceSeconds?: number;
   nowSeconds?: number;
+  /** Defaults to v1 for existing consumers. Festapp explicitly opts into v2. */
+  eventVersion?: '1' | '2';
 }
 
 function isNullableString(value: unknown): value is string | null {
@@ -114,7 +124,7 @@ function isPositiveSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
 }
 
-function isTransaction(value: unknown): value is Transaction {
+function isTransaction(value: unknown, version: '1' | '2'): value is Transaction {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const data = value as Record<string, unknown>;
   const nullableStrings = [
@@ -122,9 +132,18 @@ function isTransaction(value: unknown): value is Transaction {
     'sender_name', 'user_identification', 'transaction_type', 'performed_by',
     'comment', 'command_id', 'transaction_id', 'external_id',
   ];
-  return isPositiveSafeInteger(data.id)
+  const v2Valid = version === '1' || (
+    ['CZK', 'EUR', 'USD'].includes(String(data.currency))
+    && typeof data.date === 'string' && /^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/.test(data.date) && Number.isFinite(Date.parse(data.date))
+    && isNullableString(data.raw_vs) && isNullableString(data.payer_reference)
+    && data.direction === ((data.amount_cents as number) > 0 ? 'incoming' : (data.amount_cents as number) < 0 ? 'outgoing' : 'zero')
+    && ['movement', 'observation', 'historical_unverified'].includes(String(data.identity_kind))
+    && typeof data.identity_provenance === 'string' && data.identity_provenance.length > 0
+    && (data.identity_kind !== 'movement' || typeof data.transaction_id === 'string' && data.transaction_id.length > 0 && data.identity_provenance === 'fio_api_column22' && data.source === 'fio_api')
+  );
+  return v2Valid && isPositiveSafeInteger(data.id)
     && isPositiveSafeInteger(data.bank_account_id)
-    && isPositiveSafeInteger(data.amount_cents)
+    && (version === '1' ? isPositiveSafeInteger(data.amount_cents) : typeof data.amount_cents === 'number' && Number.isSafeInteger(data.amount_cents))
     && typeof data.currency === 'string' && /^[A-Z]{3}$/.test(data.currency)
     && nullableStrings.every(field => isNullableString(data[field]))
     && (data.source === 'email' || data.source === 'fio_api')
@@ -191,8 +210,8 @@ export async function verifyWebhook(args: VerifyWebhookArgs): Promise<WebhookEnv
     throw new WebhookVerificationError('body_invalid');
   }
   if (value.event !== 'transaction.received') throw new WebhookVerificationError('event_unsupported');
-  if (value.event_version !== '1') throw new WebhookVerificationError('event_version_unsupported');
-  if (typeof value.pairing_code !== 'string' || !/^[0-9a-f]{10}$/i.test(value.pairing_code) || !isTransaction(value.data)) {
+  if (value.event_version !== (args.eventVersion ?? '1')) throw new WebhookVerificationError('event_version_unsupported');
+  if (typeof value.pairing_code !== 'string' || !/^[0-9a-f]{10}$/i.test(value.pairing_code) || !isTransaction(value.data, args.eventVersion ?? '1')) {
     throw new WebhookVerificationError('body_invalid');
   }
   return envelope as WebhookEnvelope;

@@ -8,7 +8,7 @@ import type { WebhookQueueMessage } from './queue';
 import type { SenderResult, WebhookSender } from './webhookSender';
 import type { WebhookEnvelope } from './types';
 
-const MIGRATIONS = ['0001_schema.sql'];
+const MIGRATIONS = ['0001_schema.sql','0011_complete_bank_facts.sql'];
 
 function wrapAsD1(sqlite: Database.Database): D1Database {
   return {

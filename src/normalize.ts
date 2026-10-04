@@ -30,3 +30,14 @@ export function toCents(amount: number, currency: string): number {
   }
   return Math.round(amount * 10 ** dec);
 }
+
+/** Convert a decimal representation without binary floating point rounding. */
+export function decimalToCents(raw: string, currency: string): number {
+  if (MINOR_UNIT_DECIMALS[currency] !== 2) throw new Error('unsupported_currency_minor_unit');
+  const normalized = raw.replace(/\s/g, '').replace(',', '.');
+  const match = /^([+-]?)(\d+)(?:\.(\d{1,2}))?$/.exec(normalized);
+  if (!match) throw new Error('invalid_exact_amount');
+  const cents = (BigInt(match[2]!) * 100n + BigInt((match[3] ?? '').padEnd(2, '0'))) * (match[1] === '-' ? -1n : 1n);
+  if (cents > BigInt(Number.MAX_SAFE_INTEGER) || cents < BigInt(Number.MIN_SAFE_INTEGER)) throw new Error('amount_out_of_range');
+  return Number(cents);
+}

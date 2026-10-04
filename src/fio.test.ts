@@ -55,9 +55,9 @@ describe('mapFioTransaction', () => {
     expect(mapped!.date).toBe('2026-05-08T12:00:00.000Z');
   });
 
-  it('drops outgoing and zero payments', () => {
-    expect(mapFioTransaction(fioTx({ column1: { value: '-10.00' } }))).toBeNull();
-    expect(mapFioTransaction(fioTx({ column1: { value: '0.00' } }))).toBeNull();
+  it('preserves outgoing and zero payments', () => {
+    expect(mapFioTransaction(fioTx({ column1: { value: '-10.00' } }))).toMatchObject({amount_cents:-1000,direction:'outgoing'});
+    expect(mapFioTransaction(fioTx({ column1: { value: '0.00' } }))).toMatchObject({amount_cents:0,direction:'zero'});
   });
 
   it('throws on missing or unknown currency', () => {
@@ -74,7 +74,7 @@ describe('Fio API client', () => {
 
     const rows = await fetchNewTransactions('token-123');
     expect(rows).toHaveLength(1);
-    expect(fetch).toHaveBeenCalledWith('https://fioapi.fio.cz/v1/rest/last/token-123/transactions.json');
+    expect(fetch).toHaveBeenCalledWith('https://fioapi.fio.cz/v1/rest/last/token-123/transactions.json', expect.objectContaining({signal:expect.any(AbortSignal)}));
   });
 
   it('fetchNewTransactions handles 429 as rate limited', async () => {
@@ -95,7 +95,7 @@ describe('Fio API client', () => {
   it('setFioPointer calls date endpoint', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('ok', { status: 200 })));
     await setFioPointer('token-123', '2026-02-07');
-    expect(fetch).toHaveBeenCalledWith('https://fioapi.fio.cz/v1/rest/set-last-date/token-123/2026-02-07/');
+    expect(fetch).toHaveBeenCalledWith('https://fioapi.fio.cz/v1/rest/set-last-date/token-123/2026-02-07/', expect.objectContaining({signal:expect.any(AbortSignal)}));
   });
 
   const PROXY = { url: 'https://supabase.example/functions/v1/fio-proxy', secret: 's3cr3t' };
@@ -139,6 +139,6 @@ describe('Fio API client', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     await fetchNewTransactions('token-123');
-    expect(fetchMock).toHaveBeenCalledWith('https://fioapi.fio.cz/v1/rest/last/token-123/transactions.json');
+    expect(fetchMock).toHaveBeenCalledWith('https://fioapi.fio.cz/v1/rest/last/token-123/transactions.json', expect.objectContaining({signal:expect.any(AbortSignal)}));
   });
 });
