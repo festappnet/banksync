@@ -26,13 +26,15 @@ export interface BackupResult {
 
 /** Tables the backup exports. Kept in lockstep with the schema: the backup
  * completeness test fails if any application table is neither here nor in
- * BACKUP_EXCLUDED, so a new table can never be silently omitted from backups. */
+ * BACKUP_EXCLUDED, so a new table can never be silently omitted from backups.
+ * Parents precede dependants so restore works with foreign keys enforced. */
 export const TABLES = [
-  'bank_recovery_batches', 'authenticated_email_spool', 'fio_poll_cursors',
-  'physical_accounts', 'account_aliases', 'payment_reference_grants', 'payment_references', 'payment_reference_conflicts',
-  'bank_accounts',
-  'transactions',
   'webhook_consumers',
+  'physical_accounts',
+  'bank_accounts',
+  'account_aliases', 'payment_reference_grants', 'payment_references', 'payment_reference_conflicts',
+  'bank_recovery_batches', 'authenticated_email_spool', 'fio_poll_cursors',
+  'transactions',
   'webhook_subscriptions',
   'parse_log',
   'webhook_log',
