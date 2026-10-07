@@ -1971,6 +1971,29 @@ describe('authenticated encrypted email spool',()=>{
     expect(storage.objects.size).toBe(0);
     expect(sqlite.prepare('SELECT count(*) AS n FROM transactions').get()).toEqual({n:1});
   });
+  it('completes Air Bank pending-card recovery without crediting a v1 consumer',async()=>{
+    const {db,sqlite}=makeTestDb();const env=makeEnv(db);const storage=bucket();
+    env.AUTHENTICATED_EMAIL_SPOOL='on';env.BACKUPS=storage.binding;
+    const {pairingCode,accountId}=await seedFullSetup(db,sqlite);
+    sqlite.exec(readFileSync(resolve(__dirname,'../migrations/0011_complete_bank_facts.sql'),'utf8'));
+    sqlite.prepare("UPDATE bank_accounts SET account_number='123456/3030',account_type='AIRBANK' WHERE id=?").run(accountId);
+    const headers=buildFioEmail(`${pairingCode}@banksync.festapp.net`)
+      .split('\r\n\r\n')[0]!.replaceAll('fio.cz','airbank.cz').replace('noreply@airbank.cz','info@airbank.cz');
+    const raw=`${headers}\r\n\r\nzůstatek na účtu Běžný účet 1 číslo 123456/3030 se snížil o částku 260,00 CZK.
+Platba kartou (nezaúčtováno) v TEST SHOP
+Částka: 260,00 CZK
+Datum provedení: 06.10.2026
+Kód transakce: 123456789012`;
+    await processEmail(makeStream(raw),env);
+    await processEmail(makeStream(raw),env);
+    expect(sqlite.prepare('SELECT amount_cents,date,transaction_type,identity_kind FROM transactions').all()).toEqual([{
+      amount_cents:-26000,date:'2026-10-06T12:00:00.000Z',
+      transaction_type:'Platba kartou (nezaúčtováno)',identity_kind:'observation',
+    }]);
+    expect(sqlite.prepare('SELECT state FROM authenticated_email_spool').all()).toEqual([{state:'completed'}]);
+    expect(sqlite.prepare('SELECT COUNT(*) AS n FROM webhook_delivery_jobs').get()).toEqual({n:0});
+    expect(storage.objects.size).toBe(0);
+  });
   it('does not spool unauthenticated messages',async()=>{
     const {db,sqlite}=makeTestDb();const env=makeEnv(db);const storage=bucket();env.AUTHENTICATED_EMAIL_SPOOL='on';env.BACKUPS=storage.binding;
     const {pairingCode}=await seedFullSetup(db,sqlite);
