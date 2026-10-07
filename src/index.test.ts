@@ -1,3 +1,4 @@
+import {operationsDb} from './operationsTestSupport';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
@@ -1994,6 +1995,54 @@ Kód transakce: 123456789012`;
     expect(sqlite.prepare('SELECT COUNT(*) AS n FROM webhook_delivery_jobs').get()).toEqual({n:0});
     expect(storage.objects.size).toBe(0);
   });
+  it('uses one schema-13 retry decision for R2 and D1 after a transient insertion failure',async()=>{
+    const {db,sqlite}=operationsDb();const env=makeEnv(db);const storage=bucket();env.AUTHENTICATED_EMAIL_SPOOL='on';env.BACKUPS=storage.binding;
+    const {pairingCode}=await seedFullSetup(db,sqlite);
+    const prepare=db.prepare.bind(db);
+    db.prepare=((sql:string)=>{if(sql.includes('INSERT OR IGNORE INTO transactions')) throw new Error('temporary outage');return prepare(sql);}) as typeof db.prepare;
+    await processEmail(makeStream(buildFioEmail(`${pairingCode}@banksync.festapp.net`)),env);
+    db.prepare=prepare;
+    expect(sqlite.prepare('SELECT state,attempts,last_error FROM authenticated_email_spool').get()).toEqual({state:'pending',attempts:1,last_error:'email_processing_failed'});
+    await worker.scheduled({cron:'* * * * *',scheduledTime:0} as unknown as ScheduledEvent,env,{} as ExecutionContext);
+    expect(sqlite.prepare('SELECT attempts FROM authenticated_email_spool').get()).toEqual({attempts:1});
+    sqlite.exec("UPDATE authenticated_email_spool SET next_attempt_at=datetime('now','-1 second')");
+    await worker.scheduled({cron:'* * * * *',scheduledTime:0} as unknown as ScheduledEvent,env,{} as ExecutionContext);
+    expect(sqlite.prepare('SELECT state,attempts,cipher FROM authenticated_email_spool').get()).toEqual({state:'completed',attempts:2,cipher:null});
+    expect(storage.objects.size).toBe(0);expect(sqlite.prepare('SELECT count(*) AS n FROM transactions').get()).toEqual({n:1});
+  });
+  it('quarantines both variants of a pending Message-ID conflict and never retries their parsing',async()=>{
+    const {db,sqlite}=operationsDb();const env=makeEnv(db);const storage=bucket();env.AUTHENTICATED_EMAIL_SPOOL='on';env.BACKUPS=storage.binding;
+    const {pairingCode,accountId}=await seedFullSetup(db,sqlite);sqlite.prepare('UPDATE bank_accounts SET ingest_enabled=0 WHERE id=?').run(accountId);
+    const raw=buildFioEmail(`${pairingCode}@banksync.festapp.net`);
+    await processEmail(makeStream(raw),env);await processEmail(makeStream(raw.replace('1 990,00','1 991,00')),env);
+    expect(sqlite.prepare('SELECT state,last_error,attempts FROM authenticated_email_spool ORDER BY attempts').all()).toEqual([
+      {state:'quarantined',last_error:'email_transport_body_conflict',attempts:0},
+      {state:'quarantined',last_error:'email_transport_body_conflict',attempts:1},
+    ]);
+    const logs=sqlite.prepare('SELECT count(*) AS n FROM parse_log').get();
+    await worker.scheduled({cron:'* * * * *',scheduledTime:0} as unknown as ScheduledEvent,env,{} as ExecutionContext);
+    expect(sqlite.prepare('SELECT count(*) AS n FROM parse_log').get()).toEqual(logs);
+    expect(storage.objects.size).toBe(2);expect(sqlite.prepare('SELECT count(*) AS n FROM transactions').get()).toEqual({n:0});
+  });
+  it('quarantines authenticated mail with no registered recipient instead of looping R2 orphans',async()=>{
+    const {db,sqlite}=operationsDb();const env=makeEnv(db);const storage=bucket();env.AUTHENTICATED_EMAIL_SPOOL='on';env.BACKUPS=storage.binding;
+    await processEmail(makeStream(buildFioEmail('abcdef0123@banksync.festapp.net')),env);
+    expect(sqlite.prepare('SELECT bank_account_id,state,attempts,last_error FROM authenticated_email_spool').get()).toEqual({bank_account_id:null,state:'quarantined',attempts:1,last_error:'authenticated_email_quarantined'});
+    await worker.scheduled({cron:'* * * * *',scheduledTime:0} as unknown as ScheduledEvent,env,{} as ExecutionContext);
+    expect(sqlite.prepare('SELECT attempts FROM authenticated_email_spool').get()).toEqual({attempts:1});
+    expect(sqlite.prepare('SELECT COUNT(*) AS n FROM transactions').get()).toEqual({n:0});expect(storage.objects.size).toBe(1);
+  });
+  it('holds authenticated email in R2 during a schema transition and resumes after writers reopen',async()=>{
+    const {db,sqlite}=operationsDb();const env=makeEnv(db);const storage=bucket();env.AUTHENTICATED_EMAIL_SPOOL='on';env.BACKUPS=storage.binding;
+    const {pairingCode}=await seedFullSetup(db,sqlite);sqlite.exec("INSERT INTO schema_meta(key,value) VALUES('recovery_maintenance','on')");
+    await processEmail(makeStream(buildFioEmail(`${pairingCode}@banksync.festapp.net`)),env);
+    expect(storage.objects.size).toBe(1);expect(sqlite.prepare('SELECT COUNT(*) AS n FROM authenticated_email_spool').get()).toEqual({n:0});
+    await worker.scheduled({cron:'* * * * *',scheduledTime:0} as unknown as ScheduledEvent,env,{} as ExecutionContext);
+    expect(sqlite.prepare('SELECT COUNT(*) AS n FROM transactions').get()).toEqual({n:0});
+    sqlite.exec("UPDATE schema_meta SET value='off' WHERE key='recovery_maintenance'");
+    await worker.scheduled({cron:'* * * * *',scheduledTime:0} as unknown as ScheduledEvent,env,{} as ExecutionContext);
+    expect(sqlite.prepare('SELECT COUNT(*) AS n FROM transactions').get()).toEqual({n:1});expect(storage.objects.size).toBe(0);
+  });
   it('does not spool unauthenticated messages',async()=>{
     const {db,sqlite}=makeTestDb();const env=makeEnv(db);const storage=bucket();env.AUTHENTICATED_EMAIL_SPOOL='on';env.BACKUPS=storage.binding;
     const {pairingCode}=await seedFullSetup(db,sqlite);
@@ -2048,5 +2097,30 @@ describe('schema11 immediate webhook dispatch',()=>{
     expect(await retry.json()).toMatchObject({inserted:0,skipped_duplicate:1,queued_webhooks:1});
     expect(sqlite.prepare('SELECT count(*) AS n FROM transactions').get()).toEqual({n:1});
     expect(queueSend).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('schema 13 shared polling entrypoints',()=>{
+  afterEach(()=>vi.unstubAllGlobals());
+  it('uses the same bootstrap/reset/delta engine from manual, queue and scheduled entrypoints',async()=>{
+    const {db,sqlite}=operationsDb();const queueSend=vi.fn();const env=makeEnv(db,queueSend);
+    const {accountId,appId}=await seedFullSetup(db,sqlite);
+    sqlite.prepare("UPDATE webhook_consumers SET event_version='2' WHERE app_id=?").run(appId);
+    const encrypted=await encryptSecret('synthetic-token',env);
+    sqlite.prepare("UPDATE bank_accounts SET ingest_mode='api',api_token_cipher=?,api_token_key_ver=1,api_fetch_enabled=1 WHERE id=?").run(encrypted.cipher,accountId);
+    const statement=()=>new Response(JSON.stringify({accountStatement:{info:{accountId:'123456',bankId:'2010',currency:'CZK',idLastDownload:null,idTo:'990001'},transactionList:{transaction:[{...fioApiTx('990001'),column0:{value:new Date().toISOString().slice(0,10)}}]}}}));
+    const fetch=vi.fn().mockImplementationOnce(statement).mockResolvedValueOnce(new Response('')).mockImplementationOnce(statement);vi.stubGlobal('fetch',fetch);
+    const initial=await adminReq('POST',`/bank-accounts/${accountId}/fio-sync`,env);expect(initial.status).toBe(200);
+    expect(await initial.json()).toMatchObject({inserted:1,deferred:true,queued_webhooks:1});
+    const unlock=()=>sqlite.exec("UPDATE bank_poll_leases SET lease_until=datetime('now','-1 second'),next_allowed_at=datetime('now','-1 second'); UPDATE bank_accounts SET api_last_fetch_at=datetime('now','-1 hour')");
+    unlock();env.API_SYNC_QUEUE={send:vi.fn()} as unknown as Queue;
+    const ack=vi.fn();await worker.queue({queue:'banksync-api-sync',messages:[{body:{kind:'api_sync_tick',source:'cron'},ack,retry:vi.fn(),attempts:1}]} as unknown as MessageBatch<unknown>,env,fakeCtx);
+    expect(ack).toHaveBeenCalledOnce();expect(fetch.mock.calls[1]![0]).toContain('/set-last-date/');
+    unlock();delete env.API_SYNC_QUEUE;
+    await worker.scheduled({cron:'* * * * *',scheduledTime:0} as unknown as ScheduledEvent,env,fakeCtx);
+    expect(fetch.mock.calls[2]![0]).toContain('/last/');expect(fetch).toHaveBeenCalledTimes(3);
+    expect(sqlite.prepare('SELECT COUNT(*) AS n FROM transactions').get()).toEqual({n:1});
+    expect(sqlite.prepare('SELECT COUNT(*) AS n FROM webhook_delivery_jobs').get()).toEqual({n:1});
+    expect(sqlite.prepare('SELECT last_committed_movement_id FROM fio_poll_cursors').get()).toEqual({last_committed_movement_id:'990001'});
   });
 });

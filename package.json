@@ -16,6 +16,8 @@
     "migrations",
     "scripts/decrypt-backup.mjs",
     "README.md",
+    "docs/guide.md",
+    "docs/security-hardening-rollout.md",
     "LICENSE"
   ],
   "exports": {

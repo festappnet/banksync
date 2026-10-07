@@ -28,7 +28,7 @@ export interface BackupResult {
  * completeness test fails if any application table is neither here nor in
  * BACKUP_EXCLUDED, so a new table can never be silently omitted from backups. */
 export const TABLES = [
-  'bank_recovery_batches', 'authenticated_email_spool',
+  'bank_recovery_batches', 'authenticated_email_spool', 'fio_poll_cursors',
   'physical_accounts', 'account_aliases', 'payment_reference_grants', 'payment_references', 'payment_reference_conflicts',
   'bank_accounts',
   'transactions',
@@ -170,6 +170,7 @@ export async function buildSqlDump(db: D1Database): Promise<{
   for (const table of TABLES) {
     if(Number(versionRow?.value??0)<11 && ['bank_recovery_batches','authenticated_email_spool'].includes(table))continue;
     if(Number(versionRow?.value??0)<12 && ['physical_accounts','account_aliases','payment_reference_grants','payment_references','payment_reference_conflicts'].includes(table))continue;
+    if(Number(versionRow?.value??0)<13 && table==='fio_poll_cursors')continue;
     const r = await db.prepare(`SELECT * FROM ${table}`).all<Record<string, unknown>>();
     rowCounts[table] = r.results.length;
     if (r.results.length === 0) continue;

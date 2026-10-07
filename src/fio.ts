@@ -69,7 +69,7 @@ export interface FioProxyConfig {
   secret: string;
 }
 
-type FioOp = 'transactions' | 'set-last-date' | 'periods';
+type FioOp = 'transactions' | 'set-last-date' | 'set-last-id' | 'periods';
 
 async function fioRequest(
   op: FioOp,
@@ -78,12 +78,13 @@ async function fioRequest(
   proxy: FioProxyConfig | undefined,
   date?: string,
   toDate?: string,
+  movementId?: string,
 ): Promise<Response> {
   if (proxy?.url && proxy.secret) {
     return fetch(proxy.url, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-fio-proxy-secret': proxy.secret },
-      body: JSON.stringify(date === undefined ? { op, token } : { op, token, date, ...(toDate ? { toDate } : {}) }),
+      body: JSON.stringify({op,token,...(date === undefined ? {} : {date}),...(toDate === undefined ? {} : {toDate}),...(movementId === undefined ? {} : {id:movementId})}),
       signal: AbortSignal.timeout(55_000),
     });
   }
@@ -132,6 +133,42 @@ export async function setFioPointer(token: string, yyyyMmDd: string, proxy?: Fio
   }
   const res = await fioRequest('set-last-date', token, `${endpoint('set-last-date', token)}/${yyyyMmDd}/`, proxy, yyyyMmDd);
   await ensureFioResponse(res, proxy);
+}
+
+/** Preserve the account and bank cursor header. The rows-only compatibility
+ * helper above is intentionally not used by durable recovery. */
+export interface FioStatement {
+  info: Record<string, unknown>;
+  transactions: FioTransaction[];
+}
+
+async function readFioStatement(response: Response): Promise<FioStatement> {
+  const document = await response.json() as {accountStatement?: {info?:Record<string,unknown>; transactionList?:{transaction?:FioTransaction[]|FioTransaction}}};
+  const statement = document.accountStatement;
+  if (!statement?.info || typeof statement.info !== 'object' || Array.isArray(statement.info)) throw new Error('missing_statement_info');
+  const rows = statement.transactionList?.transaction ?? [];
+  return {info:statement.info,transactions:Array.isArray(rows)?rows:[rows]};
+}
+
+export async function fetchFioDelta(token: string, proxy?: FioProxyConfig): Promise<FioStatement> {
+  const response = await fioRequest('transactions',token,`${endpoint('last',token)}/transactions.json`,proxy);
+  await ensureFioResponse(response,proxy);
+  return readFioStatement(response);
+}
+
+export function fioMovementId(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'number' && !Number.isSafeInteger(value)) throw new Error('unsafe_fio_identity');
+  if (typeof value !== 'string' && typeof value !== 'number') throw new Error('invalid_fio_movement_id');
+  const id = String(value);
+  if (!/^[1-9][0-9]{0,19}$/.test(id)) throw new Error('invalid_fio_movement_id');
+  return id;
+}
+
+export async function setFioPointerById(token: string, id: string, proxy?: FioProxyConfig): Promise<void> {
+  if (fioMovementId(id) === null) throw new Error('invalid_fio_movement_id');
+  const response = await fioRequest('set-last-id',token,`${endpoint('set-last-id',token)}/${id}/`,proxy,undefined,undefined,id);
+  await ensureFioResponse(response,proxy);
 }
 
 function column(raw: FioTransaction, idx: number): string | null {
@@ -229,9 +266,5 @@ export async function fetchFioStatement(token: string, from: string, to: string,
   if (from > to || Date.parse(to)-Date.parse(from) > 90*86400000) throw new Error('unbounded_statement_window');
   const response = await fioRequest('periods',token,`${endpoint('periods',token)}/${from}/${to}/transactions.json`,proxy,from,to);
   await ensureFioResponse(response, proxy);
-  const document = await response.json() as {accountStatement?: {info?:Record<string,unknown>; transactionList?:{transaction?:FioTransaction[]|FioTransaction}}};
-  const statement = document.accountStatement;
-  if (!statement?.info) throw new Error('missing_statement_info');
-  const rows = statement.transactionList?.transaction ?? [];
-  return {info:statement.info,transactions:Array.isArray(rows)?rows:[rows]};
+  return readFioStatement(response);
 }

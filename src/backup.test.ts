@@ -181,7 +181,7 @@ describe('backup allowlist completeness', () => {
 
     // And no allowlisted table is stale (present in the list but not the schema).
     const schema = new Set(tables);
-    expect(TABLES.filter((t) => !schema.has(t) && !['bank_recovery_batches','authenticated_email_spool','physical_accounts','account_aliases','payment_reference_grants','payment_references','payment_reference_conflicts'].includes(t))).toEqual([]);
+    expect(TABLES.filter((t) => !schema.has(t) && !['bank_recovery_batches','authenticated_email_spool','fio_poll_cursors','physical_accounts','account_aliases','payment_reference_grants','payment_references','payment_reference_conflicts'].includes(t))).toEqual([]);
   });
 });
 
