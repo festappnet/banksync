@@ -377,6 +377,52 @@ describe('parseEmail — AirBank no date field', () => {
   });
 });
 
+describe('parseEmail - Air Bank card notifications', () => {
+  // Minimal anonymized reproduction of the production missing-date notification.
+  const card = `zůstatek na účtu Běžný účet 1 číslo 1234567890/3030 se snížil o částku 260,00 CZK.
+Dostupný zůstatek k 06.10.2026 v 19:54 je 999,00 CZK.
+Platba kartou (nezaúčtováno) v TEST SHOP
+Částka: 260,00 CZK
+Datum provedení: 06.10.2026
+Kód transakce: 123456789012`;
+
+  it('uses the bank execution date and preserves an outgoing pending observation', () => {
+    expect(parseEmail(card, 'airbank_email')).toMatchObject({
+      date: '2026-10-06T12:00:00.000Z',
+      amount_cents: -26000,
+      direction: 'outgoing',
+      transaction_type: 'Platba kartou (nezaúčtováno)',
+      identity_kind: 'observation',
+    });
+  });
+
+  it('prefers the booking date over execution and balance dates', () => {
+    expect(parseEmail(`${card}\nDatum zaúčtování: 07.10.2026`, 'airbank_email')?.date)
+      .toBe('2026-10-07T12:00:00.000Z');
+  });
+
+  it('preserves an explicitly negative outgoing amount', () => {
+    expect(parseEmail(card.replace('Částka: 260', 'Částka: -260'), 'airbank_email')?.amount_cents)
+      .toBe(-26000);
+  });
+
+  it('does not use the balance timestamp when a transaction date is absent', () => {
+    expect(parseEmail(card.replace('Datum provedení: 06.10.2026', ''), 'airbank_email')?.date)
+      .toBeNull();
+  });
+
+  it('rejects conflicting amount direction instead of creating an incoming payment', () => {
+    expect(parseEmail(card.replace('se snížil', 'se zvýšil').replace('Částka: 260', 'Částka: -260'), 'airbank_email'))
+      .toBeNull();
+  });
+
+  it('does not take direction from payer-controlled message text', () => {
+    const withoutSummary=card.slice(card.indexOf('\n')+1);
+    expect(parseEmail(`${withoutSummary}\nZpráva pro příjemce: se snížil o částku 260,00 CZK`, 'airbank_email')?.amount_cents)
+      .toBe(26000);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // 11. Date normalisation — explicit offset
 // ---------------------------------------------------------------------------

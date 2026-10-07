@@ -320,7 +320,14 @@ export function parseEmail(
     if (isNaN(amount)) return null;
 
 
-    const amount_cents = decimalToCents(amountField.rawAmount, currency);
+    let amount_cents = decimalToCents(amountField.rawAmount, currency);
+    // Air Bank's amount field is unsigned even for outgoing card notifications.
+    // The bank's balance-change statement supplies direction; never double-negate.
+    const balanceChange = text.match(/(?:^|\n)[ \t]*(?:zůstatek|zustatek)[ \t]+na[ \t]+(?:účtu|uctu)[^\n]{0,300}\bse\s+(snížil|snizil|zvýšil|zvysil)\s+o\s+částku/i);
+    if (balanceChange) {
+      if (/^(?:snížil|snizil)$/i.test(balanceChange[1]!)) amount_cents = -Math.abs(amount_cents);
+      else if (amount_cents < 0) return null;
+    }
 
     // AirBank: "z účtu Name Name číslo 123/2010" or "z účtu 123/2010"
     const counterparty = parseAirbankCounterparty(text);
@@ -330,9 +337,11 @@ export function parseEmail(
     const ssMatch = text.match(/(?:Specifický symbol|\bSS\b)\s*:\s*([0-9]+)/i);
     const msgMatch = text.match(/(?:Zpráva pro příjemce|Zprava)\s*:\s*(.*)/i);
     const idMatch = text.match(/(?:Kód transakce|Kod transakce)\s*:\s*([0-9]+)/i);
-    const dateMatch = text.match(
-      /(?:Datum zaúčtování|Datum zauctovani)\s*:\s*(\d{2}\.\d{2}\.\d{4}(?:\s+\d{2}:\d{2}(?::\d{2})?(?:\s*[+-]\d{2}:?\d{2})?)?)/i,
-    );
+    // Prefer booking when both are present. Pending card payments only carry
+    // execution date; a balance timestamp is not a transaction date.
+    const bankDate = findLabeledLineValue(text, ['datum zaúčtování', 'datum zauctovani'])
+      ?? findLabeledLineValue(text, ['datum provedení', 'datum provedeni']);
+    const cardType = text.match(/(?:^|\n)\s*(Platba kartou(?:\s*\(nezaúčtováno\))?)(?=\s|$)/i);
 
     let counter_account: string | null = null;
     let bank_code: string | null = null;
@@ -346,8 +355,8 @@ export function parseEmail(
       bank_code = parts.length > 1 ? (parts[1] ?? null) : null;
     }
 
-    const { date, date_offset_min } = dateMatch
-      ? parseDateToUTC(dateMatch[1] ?? '')
+    const { date, date_offset_min } = bankDate
+      ? parseDateToUTC(bankDate)
       : { date: null, date_offset_min: null as number | null };
 
     return {
@@ -362,7 +371,7 @@ export function parseEmail(
       message: msgMatch ? ((msgMatch[1] ?? '').trim() || null) : null,
       sender_name,
       user_identification: null,
-      transaction_type: null,
+      transaction_type: cardType?.[1] ?? null,
       performed_by: null,
       comment: null,
       payer_reference: null,
