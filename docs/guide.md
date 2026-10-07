@@ -94,6 +94,21 @@ HMAC, timestamp syntax and tolerance, delivery header/body equality, event name
 and event version. Failure throws `WebhookVerificationError` with a stable code.
 There is intentionally no public HMAC-only verifier.
 
+```ts
+import { verifyWebhook } from "@festapp/banksync";
+
+const event = await verifyWebhook({
+  secret,
+  timestamp: request.headers.get("x-banksync-timestamp") ?? "",
+  deliveryId: request.headers.get("x-banksync-delivery-id") ?? "",
+  signature: request.headers.get("x-banksync-signature") ?? "",
+  bodyBytes: new Uint8Array(await request.arrayBuffer()),
+});
+```
+
+Atomically claim `event.delivery_id` in your database before applying payment
+changes. Set `eventVersion: "2"` when consuming version 2 events.
+
 ## Security model
 
 - **Email trust:** Cloudflare Email Routing is the SMTP/envelope seam. A message
