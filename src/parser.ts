@@ -341,7 +341,7 @@ export function parseEmail(
     // execution date; a balance timestamp is not a transaction date.
     const bankDate = findLabeledLineValue(text, ['datum zaúčtování', 'datum zauctovani'])
       ?? findLabeledLineValue(text, ['datum provedení', 'datum provedeni']);
-    const cardType = text.match(/(?:^|\n)\s*(Platba kartou(?:\s*\(nezaúčtováno\))?)(?=\s|$)/i);
+    const cardType = text.match(/(?:^|\n)[ \t]*(Platba kartou(?:[ \t]*\(nezaúčtováno\))?)(?=[ \t\r\n]|$)/i);
 
     let counter_account: string | null = null;
     let bank_code: string | null = null;
