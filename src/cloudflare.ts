@@ -1,3 +1,5 @@
+import {recoveryMaintenanceEnabled} from './recoveryMaintenance';
+import {beginEmailRecovery,completeEmailRecovery,failEmailRecovery,emailFailureCategory,emailR2Disposition,type EmailRecoveryClaim} from './emailRecovery';
 import {canonicalIban,mapPhysicalAccount,referenceScope,reservePaymentReference,lookupPaymentReference} from './paymentReferences';
 import type {
   D1Database,
@@ -42,6 +44,7 @@ import {
   listWebhookLog,
   listUnmatchedMails,
   pruneRetention,
+  pruneCompletedRecovery,
   updateBankAccount,
   updateBankAccountOwner,
   setBankAccountApiToken,
@@ -89,6 +92,7 @@ import {
   findDeliveryJobsForTransaction,
 } from './webhookDelivery';
 import { recoverBankAccount } from './bankRecovery';
+import {recoverFioAccount} from './fioRecovery';
 import { fetchNewTransactions, FioRateLimited, FioTransientFailure, FioTokenInvalidOrInactive, FioReceivingAccountMismatch, mapFioTransaction, setFioPointer } from './fio';
 import type { ApiFetchAccount, BankAccount, Transaction } from './types';
 import type { GenericSchema, InferOutput } from 'valibot';
@@ -169,6 +173,7 @@ export async function processEmail(
 ): Promise<void> {
   let bodyText: string | undefined;
   let spoolId: string | undefined;
+  let recoveryClaim: EmailRecoveryClaim | undefined;
   const reader=rawStream.getReader();const parts:Uint8Array[]=[];let byteCount=0;
   while(true) {
     const item=await reader.read();if(item.done) break;
@@ -220,6 +225,12 @@ export async function processEmail(
       if(!existing) await env.BACKUPS.put(r2SpoolKey,JSON.stringify(encrypted));
     }
 
+    if(await recoveryMaintenanceEnabled(env.DB)) {
+      if(!r2SpoolKey) throw new Error('recovery_maintenance_requires_durable_spool');
+      log('email_recovery_maintenance_deferred',{});
+      return;
+    }
+
     // Resolve the bank account from authenticated envelope recipient, then classify.
     // The lookup is read-only and harmless for emails that fail an earlier gate —
     // the outcome's bankAccountId stays null for pre-account rejects, so parse_log
@@ -228,20 +239,30 @@ export async function processEmail(
     const pairingCode = extractPairingCode(identity.recipient);
     const account = pairingCode ? await findBankAccountByPairingCode(env.DB, pairingCode) : null;
     const schema = await env.DB.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
-    if (account && ['11','12'].includes(schema?.value??'')) {
-      spoolId = await sha256Hex(`${account.id}:${extracted.messageId ?? await sha256Hex(rawMime)}`);
+    if ((account || schema?.value==='13') && ['11','12','13'].includes(schema?.value??'')) {
+      spoolId = await sha256Hex(`${account?.id??`recipient:${identity.recipient}`}:${extracted.messageId ?? await sha256Hex(rawMime)}`);
       const digest = await sha256Hex(rawMime);
       const encrypted = await encryptSecret(JSON.stringify({bytesBase64,envelope}),env);
+      if(schema?.value==='13') {
+        const recovery=await beginEmailRecovery(env.DB,{messageKey:spoolId,accountId:account?.id??null,digest,cipher:encrypted.cipher,keyVersion:encrypted.keyVersion,r2Key:r2SpoolKey});
+        if(recovery.kind!=='claimed') {
+          if(recovery.kind==='completed' && r2SpoolKey) await env.BACKUPS!.delete(r2SpoolKey);
+          return;
+        }
+        recoveryClaim=recovery.claim;
+      } else {
       await env.DB.prepare(`INSERT INTO authenticated_email_spool(id,bank_account_id,body_sha256,cipher,key_version)
-        VALUES(?,?,?,?,?) ON CONFLICT(id) DO NOTHING`).bind(spoolId,account.id,digest,encrypted.cipher,encrypted.keyVersion).run();
+        VALUES(?,?,?,?,?) ON CONFLICT(id) DO NOTHING`).bind(spoolId,account!.id,digest,encrypted.cipher,encrypted.keyVersion).run();
       const stored = await env.DB.prepare('SELECT body_sha256 FROM authenticated_email_spool WHERE id=?').bind(spoolId).first<{body_sha256:string}>();
       if (stored?.body_sha256 !== digest) throw new Error('email_transport_body_conflict');
+      }
     }
     async function completeSpool() {
-      if(spoolId) await env.DB.prepare("UPDATE authenticated_email_spool SET state='completed',completed_at=datetime('now') WHERE id=?").bind(spoolId).run();
+      if(recoveryClaim) await completeEmailRecovery(env.DB,recoveryClaim);
+      else if(spoolId) await env.DB.prepare("UPDATE authenticated_email_spool SET state='completed',completed_at=datetime('now') WHERE id=?").bind(spoolId).run();
       if(r2SpoolKey) await env.BACKUPS!.delete(r2SpoolKey);
     }
-    if (account && ['11','12'].includes(schema?.value??'')) {
+    if (account && ['11','12','13'].includes(schema?.value??'')) {
       const enabled=await env.DB.prepare('SELECT ingest_enabled FROM bank_accounts WHERE id=?').bind(account.id).first<{ingest_enabled:number}>();
       if(enabled?.ingest_enabled===0) throw new Error('email_connection_paused');
     }
@@ -256,7 +277,7 @@ export async function processEmail(
     }
 
     if (outcome.kind === 'reject' || outcome.kind === 'skip') {
-      if(r2SpoolKey && (outcome.reason.startsWith('parse_failed') || outcome.reason.startsWith('unknown_') || outcome.reason.startsWith('no_pairing'))) throw new Error('authenticated_email_quarantined');
+      if((r2SpoolKey || recoveryClaim) && (outcome.reason.startsWith('parse_failed') || outcome.reason.startsWith('unknown_') || outcome.reason.startsWith('no_pairing'))) throw new Error('authenticated_email_quarantined');
       await insertParseLog(env.DB, {
         bank_account_id: outcome.bankAccountId ?? null,
         error_message: outcome.reason,
@@ -274,6 +295,7 @@ export async function processEmail(
     try {
       result = await insertTransaction(env.DB, {
         bank_account_id: acct.id,
+        ...(recoveryClaim?{writeFence:{sql:`EXISTS (SELECT 1 FROM authenticated_email_spool WHERE id=? AND state='pending' AND claim_token=? AND datetime(claim_until)>datetime('now')) AND EXISTS (SELECT 1 FROM bank_accounts WHERE id=? AND account_number=? AND account_type=? AND ingest_enabled=1)`,values:[recoveryClaim.id,recoveryClaim.token,acct.id,acct.account_number,acct.account_type]}}:{}),
         payload: {
           ...outcome.parsed,
           date: outcome.parsed.date,
@@ -306,7 +328,20 @@ export async function processEmail(
     await completeSpool();
 
   } catch (err) {
-    // Last-resort catch — log unhandled exception, never rethrow
+    if(recoveryClaim) {
+      // Persist retry/quarantine once. Expected recoverable failures are not
+      // Worker exceptions and do not duplicate private parse-log payloads.
+      try {
+        if(await failEmailRecovery(env.DB,recoveryClaim,err)) {
+          const failure=emailFailureCategory(err);
+          log('email_recovery_deferred',{spool_id:recoveryClaim.id,reason:failure.code,quarantined:failure.permanent});
+          return;
+        }
+        const retained=await env.DB.prepare('SELECT state FROM authenticated_email_spool WHERE id=?').bind(recoveryClaim.id).first<{state:string}>();
+        if(retained && ['pending','completed','quarantined'].includes(retained.state)) return;
+      } catch { /* D1 outage: R2 and the expiring claim retain the message. */ }
+    }
+    // Last-resort failure is surfaced when recovery state could not be stored.
     try {
       await insertParseLog(env.DB, {
         error_message: `unhandled: ${err}`,
@@ -429,13 +464,18 @@ async function runBankApiSync(env: Env, account: ApiFetchAccount): Promise<BankA
     throw new Error(`unsupported_api_account_type: ${account.account_type}`);
   }
 
+  if(await recoveryMaintenanceEnabled(env.DB)) return {bank_account_id:account.id,provider:account.account_type,inserted:0,skipped_duplicate:0,skipped_outgoing:0,parse_errors:0,queued_webhooks:0,backfill:!account.api_backfill_done,deferred:true};
   const isBackfill = !account.api_backfill_done;
+  let durableCursor=false;
   try {
     const schema = await env.DB.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
-    if(['11','12'].includes(schema?.value??'')) {
-      const result=await recoverBankAccount(env.DB,account,env,fioProxyConfig(env));
+    durableCursor=schema?.value==='13';
+    if(['11','12','13'].includes(schema?.value??'')) {
+      const result=schema?.value==='13'
+        ? await recoverFioAccount(env.DB,account,env,fioProxyConfig(env))
+        : {...await recoverBankAccount(env.DB,account,env,fioProxyConfig(env)),deferred:false};
       const delivery=await createWebhookDeliveryCoordinator(env).sweep();
-      return {bank_account_id:account.id,provider:account.account_type,inserted:result.inserted,skipped_duplicate:result.skipped,skipped_outgoing:0,parse_errors:0,queued_webhooks:delivery.queued,backfill:isBackfill,deferred:false};
+      return {bank_account_id:account.id,provider:account.account_type,inserted:result.inserted,skipped_duplicate:result.skipped,skipped_outgoing:0,parse_errors:0,queued_webhooks:delivery.queued,backfill:isBackfill,deferred:result.deferred};
     }
     const token = await decryptSecret(account.api_token_cipher, account.api_token_key_ver, env);
     if (isBackfill && account.api_last_success_at === null) {
@@ -531,6 +571,7 @@ async function runBankApiSync(env: Env, account: ApiFetchAccount): Promise<BankA
       deferred: false,
     };
   } catch (err) {
+    if(durableCursor && err instanceof Error && err.message==='bank_poll_busy') return {bank_account_id:account.id,provider:account.account_type,inserted:0,skipped_duplicate:0,skipped_outgoing:0,parse_errors:0,queued_webhooks:0,backfill:isBackfill,deferred:true};
     await markBankAccountApiFetchFailure(env.DB, account.id, (err instanceof FioTokenInvalidOrInactive || err instanceof FioReceivingAccountMismatch) ? err.code : String(err));
     if (err instanceof FioRateLimited) {
       await writeEvent(env.DB, {
@@ -898,7 +939,7 @@ async function dispatch(
   const referenceRoute=url.pathname.match(/^\/bank-accounts\/(\d+)\/(payment-references|payment-reference-admin|account-health)$/);
   if(referenceRoute){
     const version=await env.DB.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
-    if(version?.value!=='12')return jsonResponse({error:'schema12_required'},409);
+    if(!['12','13'].includes(version?.value??''))return jsonResponse({error:'schema12_required'},409);
     const accountId=Number(referenceRoute[1]);
     try {
       if(referenceRoute[2]==='payment-reference-admin'&&req.method==='POST'){
@@ -945,8 +986,8 @@ async function dispatch(
       return jsonResponse({ error: 'fio_api_token_supported_only_for_fio' }, 400);
     }
     const expanded=await env.DB.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
-    if(input.ingest_enabled===false && !['11','12'].includes(expanded?.value??'')) return jsonResponse({error:'paused_ingest_requires_schema11'},409);
-    const capability=['11','12'].includes(expanded?.value??'') ? await env.DB.prepare('SELECT event_version FROM webhook_consumers WHERE app_id=?').bind(input.owner_app_id).first<{event_version:string}>() : null;
+    if(input.ingest_enabled===false && !['11','12','13'].includes(expanded?.value??'')) return jsonResponse({error:'paused_ingest_requires_schema11'},409);
+    const capability=['11','12','13'].includes(expanded?.value??'') ? await env.DB.prepare('SELECT event_version FROM webhook_consumers WHERE app_id=?').bind(input.owner_app_id).first<{event_version:string}>() : null;
     if(capability?.event_version==='2' && (input.ingest_mode==='email'||input.ingest_mode==='both') && (env.AUTHENTICATED_EMAIL_SPOOL!=='on'||!env.BACKUPS)) return jsonResponse({error:'durable_email_capability_not_configured'},503);
     if(capability?.event_version==='2' && input.ingest_mode==='both') return jsonResponse({error:'both_requires_verified_correlation'},409);
     const pairingCode = await generateUniquePairingCode(env.DB);
@@ -982,7 +1023,7 @@ async function dispatch(
 
     const schemaVersion = await env.DB.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
     if (input.ingest_enabled === false) {
-      if (!['11','12'].includes(schemaVersion?.value??'')) throw new Error('paused_ingest_requires_schema11');
+      if (!['11','12','13'].includes(schemaVersion?.value??'')) throw new Error('paused_ingest_requires_schema11');
       await env.DB.prepare('UPDATE bank_accounts SET ingest_enabled=0,api_fetch_enabled=0 WHERE id=?').bind(account.id).run();
     }
     // Best-path CF provision (stamp outbox with the real id + synchronous rule
@@ -1072,11 +1113,14 @@ async function dispatch(
     const existing=await requireOwnedAccount(env,id,authCtx);
     if(existing instanceof Response) return existing;
     const schema=await env.DB.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
-    if(!['11','12'].includes(schema?.value??'')) return jsonResponse({error:'schema11_required'},409);
+    if(!['11','12','13'].includes(schema?.value??'')) return jsonResponse({error:'schema11_required'},409);
     if(req.method==='PUT') {
       let input; try {input=JSON.parse(bodyText);} catch{return jsonResponse({error:'invalid_json'},400);}
       if(typeof input.enabled!=='boolean') return jsonResponse({error:'enabled_required'},400);
-      await env.DB.prepare('UPDATE bank_accounts SET ingest_enabled=? WHERE id=?').bind(input.enabled?1:0,id).run();
+      await env.DB.prepare(schema?.value==='13'
+        ? 'UPDATE bank_accounts SET api_credential_generation=api_credential_generation+CASE WHEN ingest_enabled<>? THEN 1 ELSE 0 END,ingest_enabled=? WHERE id=?'
+        : 'UPDATE bank_accounts SET ingest_enabled=? WHERE id=?')
+        .bind(...(schema?.value==='13'?[input.enabled?1:0,input.enabled?1:0,id]:[input.enabled?1:0,id])).run();
     }
     return jsonResponse(await env.DB.prepare('SELECT ingest_enabled,api_token_hash FROM bank_accounts WHERE id=?').bind(id).first());
   }
@@ -1103,6 +1147,7 @@ async function dispatch(
         token_cipher: encrypted.cipher,
         token_key_ver: encrypted.keyVersion,
         token_prefix: tokenPrefix(rawToken),
+        token_hash: await sha256Hex(rawToken),
         fetch_enabled: input.fetch_enabled ?? true,
         ingest_mode: input.ingest_mode ?? (existing.ingest_mode === 'email' ? 'api' : existing.ingest_mode),
       });
@@ -1213,7 +1258,7 @@ async function dispatch(
     const input = parseOr400(CreateConsumerSchema, bodyText);
     if (input instanceof Response) return input;
     const schemaVersion=await env.DB.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
-    if(input.event_version==='2' && !['11','12'].includes(schemaVersion?.value??'')) return jsonResponse({error:'v2_requires_schema11'},409);
+    if(input.event_version==='2' && !['11','12','13'].includes(schemaVersion?.value??'')) return jsonResponse({error:'v2_requires_schema11'},409);
     let callbackUrl: string;
     try {
       callbackUrl = validateCallbackUrl(input.callback_url, { environment: env.ENV, allowlist: env.CALLBACK_HOST_ALLOWLIST });
@@ -1590,6 +1635,7 @@ export default {
 
   async scheduled(event: ScheduledEvent, env: Env, _ctx: ExecutionContext) {
     await assertSchemaVersion(env.DB);
+    if(await recoveryMaintenanceEnabled(env.DB)) {log('recovery_maintenance_tick_deferred',{});return;}
     const runPolling = shouldRunApiPolling(event);
     const runMaintenance = shouldRunMaintenance(event);
     const runReconciliation = runPolling && shouldRunReconciliation(event);
@@ -1605,6 +1651,8 @@ export default {
           idempotency_keys_deleted: result.idempotency_keys_deleted,
           admin_audit_log_deleted: result.admin_audit_log_deleted,
           expired_prev_secrets_cleared: result.expired_prev_secrets_cleared,
+          recovery_payloads_cleared:result.recovery_payloads_cleared,recovery_batches_deleted:result.recovery_batches_deleted,
+          email_payloads_cleared:result.email_payloads_cleared,email_spool_deleted:result.email_spool_deleted,
         });
       } catch (err) {
         logError('retention_failed', err, {});
@@ -1624,11 +1672,19 @@ export default {
     }
 
     if (runReconciliation) {
+      try { await pruneCompletedRecovery(env.DB); }
+      catch(err) { logError('recovery_retention_failed',err,{}); }
+      const recoverySchema = await env.DB.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
       if(env.AUTHENTICATED_EMAIL_SPOOL==='on' && env.BACKUPS) {
         const cursor=await env.DB.prepare("SELECT value FROM schema_meta WHERE key='email_spool_cursor'").first<{value:string}>();
         const page=await env.BACKUPS.list({prefix:'authenticated-email-pending/',limit:10,...(cursor?.value ? {cursor:cursor.value} : {})});
         for(const object of page.objects) {
           try {
+            if(recoverySchema?.value==='13') {
+              const disposition=await emailR2Disposition(env.DB,object.key);
+              if(disposition==='delete') {await env.BACKUPS.delete(object.key);continue;}
+              if(disposition==='retain') continue;
+            }
             const stored=await env.BACKUPS.get(object.key);if(!stored) continue;
             const encrypted=JSON.parse(await stored.text());
             const message=JSON.parse(await decryptSecret(encrypted.cipher,encrypted.keyVersion,env));
@@ -1639,11 +1695,13 @@ export default {
         await env.DB.prepare("INSERT INTO schema_meta(key,value) VALUES('email_spool_cursor',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(page.truncated?page.cursor:'').run();
       }
       const schema = await env.DB.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
-      if(['11','12'].includes(schema?.value??'')) {
-        const pending = await env.DB.prepare("SELECT id,cipher,key_version FROM authenticated_email_spool WHERE state='pending' ORDER BY attempts,created_at LIMIT 10").all<{id:string;cipher:string;key_version:number}>();
+      if(['11','12','13'].includes(schema?.value??'')) {
+        const pending = await env.DB.prepare(schema?.value==='13'
+          ? "SELECT id,cipher,key_version FROM authenticated_email_spool WHERE state='pending' AND datetime(next_attempt_at)<=datetime('now') AND (claim_until IS NULL OR datetime(claim_until)<=datetime('now')) ORDER BY next_attempt_at,created_at,id LIMIT 10"
+          : "SELECT id,cipher,key_version FROM authenticated_email_spool WHERE state='pending' ORDER BY attempts,created_at LIMIT 10").all<{id:string;cipher:string;key_version:number}>();
         for(const row of pending.results) {
           try {
-            await env.DB.prepare('UPDATE authenticated_email_spool SET attempts=attempts+1 WHERE id=?').bind(row.id).run();
+            if(schema?.value!=='13') await env.DB.prepare('UPDATE authenticated_email_spool SET attempts=attempts+1 WHERE id=?').bind(row.id).run();
             const message=JSON.parse(await decryptSecret(row.cipher,row.key_version,env));
             const restored=Uint8Array.from(atob(message.bytesBase64),c=>c.charCodeAt(0));
           await processEmail(new Blob([restored]).stream(),env,message.envelope);
@@ -1727,6 +1785,7 @@ export default {
           ? env[`BACKUP_ENCRYPTION_KEY_V${version}` as 'BACKUP_ENCRYPTION_KEY_V1' | 'BACKUP_ENCRYPTION_KEY_V2']
           : undefined;
         const backup = await runBackupTick(env.DB, { bucket: env.BACKUPS, prefix: 'banksync', retain: 8, encryptionKey, keyVersion: version });
+        if(backup.uploaded) await env.DB.prepare("INSERT INTO schema_meta(key,value) VALUES('last_backup_at',datetime('now')) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run();
         log('backup_tick', { uploaded: backup.uploaded, key: backup.key ?? null, size_bytes: backup.size_bytes ?? null });
       } catch (err) {
         logError('backup_tick_failed', err, {});

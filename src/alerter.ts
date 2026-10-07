@@ -1,3 +1,4 @@
+import {operationalBreaches} from './operationsStatus';
 import type { D1Database } from '@cloudflare/workers-types';
 import { getStatusData } from './db';
 import { log, logError } from './logger';
@@ -68,6 +69,8 @@ export async function evaluateThresholds(db: D1Database, cfg: AlerterConfig): Pr
       threshold: cfg.thresholds.unmatched_24h,
     });
   }
+
+  if(status.operations) triggered.push(...operationalBreaches(status.operations));
 
   if (triggered.length === 0) {
     return null;

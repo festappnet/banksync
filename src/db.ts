@@ -1,3 +1,5 @@
+import {RECOVERY_WRITES_ALLOWED} from './recoveryMaintenance';
+import {getOperationsStatus,recordStorageSample,type OperationsStatus} from './operationsStatus';
 import type { D1Database } from '@cloudflare/workers-types';
 import type { ApiFetchAccount, BankAccount, InsertResult, Transaction, WebhookConsumer, WebhookSubscription } from './types';
 import { log } from './logger';
@@ -5,11 +7,9 @@ import { resolveVariableSymbol } from './referenceCandidates';
 
 // ---- schema version guard ----
 
-// Compatibility RANGE covering the current rollout: the previous stable schema
-// (8) and the contract-cleanup schema (9). Two adjacent versions so neither
-// deploy order (code-before-migration or migration-before-code) causes a global
-// 503. Older expand versions (6, 7) are gone from every environment.
-const SUPPORTED_SCHEMA_VERSIONS = ['10', '11', '12'] as const;
+// Accept the deployed schema during the additive recovery rollout. New writers
+// explicitly require schema 13; legacy schema support retains its old contract.
+const SUPPORTED_SCHEMA_VERSIONS = ['10', '11', '12', '13'] as const;
 type SupportedSchemaVersion = (typeof SUPPORTED_SCHEMA_VERSIONS)[number];
 
 const _checkedDbs = new Set<D1Database>();
@@ -208,9 +208,23 @@ export async function setBankAccountApiToken(db: D1Database, id: number, args: {
   token_cipher: string;
   token_key_ver: number;
   token_prefix: string;
+  token_hash?: string;
   fetch_enabled: boolean;
   ingest_mode?: 'email' | 'api' | 'both';
 }): Promise<BankAccount | null> {
+  const schema=await db.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
+  if(schema?.value==='13') {
+    if(!args.token_hash) throw new Error('api_token_hash_required');
+    const row=await db.prepare(`UPDATE bank_accounts SET api_token_cipher=?,api_token_key_ver=?,api_token_prefix=?,
+      api_fetch_enabled=?,ingest_mode=COALESCE(?,ingest_mode),api_last_error=NULL,
+      api_credential_generation=api_credential_generation+1,
+      api_backfill_done=CASE WHEN api_token_hash=? THEN api_backfill_done ELSE 0 END,
+      api_reconciled_through=CASE WHEN api_token_hash=? THEN api_reconciled_through ELSE NULL END,
+      api_token_hash=? WHERE id=? RETURNING ${BANK_ACCOUNT_PUBLIC_COLS}`)
+      .bind(args.token_cipher,args.token_key_ver,args.token_prefix,args.fetch_enabled?1:0,args.ingest_mode??null,
+        args.token_hash,args.token_hash,args.token_hash,id).first<BankAccountRow>();
+    return row?mapBankAccount(row):null;
+  }
   const row = await db
     .prepare(SQL_SET_BANK_ACCOUNT_API_TOKEN)
     .bind(args.token_cipher, args.token_key_ver, args.token_prefix, args.fetch_enabled ? 1 : 0, args.ingest_mode ?? null, id)
@@ -250,7 +264,10 @@ RETURNING ${BANK_ACCOUNT_PUBLIC_COLS}
 `;
 
 export async function clearBankAccountApiToken(db: D1Database, id: number): Promise<BankAccount | null> {
-  const row = await db.prepare(SQL_CLEAR_BANK_ACCOUNT_API_TOKEN).bind(id).first<BankAccountRow>();
+  const schema=await db.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
+  const sql=schema?.value==='13' ? SQL_CLEAR_BANK_ACCOUNT_API_TOKEN.replace('api_last_error = NULL',
+    'api_last_error = NULL, api_token_hash = NULL, api_credential_generation = api_credential_generation+1, api_backfill_done = 0, api_reconciled_through = NULL') : SQL_CLEAR_BANK_ACCOUNT_API_TOKEN;
+  const row = await db.prepare(sql).bind(id).first<BankAccountRow>();
   return row ? mapBankAccount(row) : null;
 }
 
@@ -500,9 +517,11 @@ const SQL_FIND_DUPLICATE_FIO = `SELECT * FROM transactions WHERE bank_account_id
 export async function insertTransaction(db: D1Database, args: {
   bank_account_id: number;
   payload: Omit<Transaction, 'id' | 'bank_account_id'>;
+  /** Internal SQL predicate for atomic credential/claim fencing of ingestion. */
+  writeFence?: {sql:string;values:(string|number)[]};
 }): Promise<InsertResult> {
   const schema = await db.prepare(`SELECT value FROM schema_meta WHERE key='version'`).first<{value: string}>();
-  const v2 = ['11','12'].includes(schema?.value??'');
+  const v2 = ['11','12','13'].includes(schema?.value??'');
   const p = {
     ...args.payload,
     vs: v2 ? (args.payload.raw_vs ?? args.payload.vs ?? null) : resolveVariableSymbol(args.payload),
@@ -537,9 +556,12 @@ export async function insertTransaction(db: D1Database, args: {
     p.amount_cents > 0 ? 'incoming' : p.amount_cents < 0 ? 'outgoing' : 'zero',
     p.identity_kind ?? (p.source === 'fio_api' && p.transaction_id ? 'movement' : 'observation'),
     p.identity_provenance ?? (p.source === 'fio_api' ? 'fio_api_column22' : 'authenticated_email_unverified_movement'));
-  const result = await db.prepare(sql).bind(...values).run();
+  const insertSql=sql.replace(/\) VALUES \(([^)]*)\)\s*$/,`) SELECT $1 WHERE ${RECOVERY_WRITES_ALLOWED}${args.writeFence?` AND (${args.writeFence.sql})`:""}`);
+  const result = await db.prepare(insertSql).bind(...values,...(args.writeFence?.values??[])).run();
 
   if (result.meta.changes === 0) {
+    if(!await db.prepare(`SELECT 1 AS allowed WHERE ${RECOVERY_WRITES_ALLOWED}`).first()) throw new Error('recovery_maintenance');
+    if(args.writeFence && !await db.prepare(`SELECT 1 AS allowed WHERE ${args.writeFence.sql}`).bind(...args.writeFence.values).first()) throw new Error('bank_poll_lease_lost');
     // A duplicate must be explained by a scoped strong or transport identity.
     if (p.transaction_id != null && p.source === 'fio_api') {
       const hit = await db.prepare(SQL_FIND_DUPLICATE_FIO).bind(args.bank_account_id, p.transaction_id).first<{ id: number }>();
@@ -809,6 +831,7 @@ export async function getHealthData(db: D1Database): Promise<HealthData> {
 }
 
 export interface StatusData {
+  operations?: OperationsStatus;
   service: {
     parse_failures_24h: number;
     parse_failure_rate_24h: number;
@@ -891,7 +914,9 @@ export async function getStatusData(db: D1Database): Promise<StatusData> {
   const webhookErrMap = new Map(webhookErrors24h.results.map(r => [r.consumer_app_id, r.cnt]));
   const deliveredMap = new Map(deliveredPerConsumer.results.map(r => [r.consumer_app_id, r.ts]));
 
+  const operations=await getOperationsStatus(db);
   return {
+    ...(operations?{operations}:{}),
     service: {
       parse_failures_24h: failuresCount,
       parse_failure_rate_24h: total24h > 0 ? Math.round((failuresCount / total24h) * 10000) / 10000 : 0,
@@ -952,6 +977,10 @@ export async function pruneRetention(db: D1Database): Promise<{
   transactions_deleted: number;
   idempotency_keys_deleted: number;
   admin_audit_log_deleted: number;
+  recovery_payloads_cleared: number;
+  recovery_batches_deleted: number;
+  email_payloads_cleared: number;
+  email_spool_deleted: number;
 }> {
   const parseLogResult = await db.prepare(SQL_PRUNE_PARSE_LOG).run();
   const webhookLogResult = await db.prepare(SQL_PRUNE_WEBHOOK_LOG).run();
@@ -960,6 +989,9 @@ export async function pruneRetention(db: D1Database): Promise<{
   const idempotencyResult = await db.prepare(SQL_PRUNE_IDEMPOTENCY_KEYS).run();
   const auditResult = await db.prepare(SQL_PRUNE_ADMIN_AUDIT_LOG).run();
   const secretsResult = await db.prepare(SQL_CLEAR_EXPIRED_PREV_SECRETS).run();
+  const recovery = await pruneCompletedRecovery(db);
+  await recordStorageSample(db);
+  await db.prepare("INSERT INTO schema_meta(key,value) VALUES('last_maintenance_at',datetime('now')) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run();
   return {
     parse_log_deleted: parseLogResult.meta.changes,
     webhook_log_deleted: webhookLogResult.meta.changes,
@@ -968,5 +1000,33 @@ export async function pruneRetention(db: D1Database): Promise<{
     transactions_deleted: txResult.meta.changes,
     idempotency_keys_deleted: idempotencyResult.meta.changes,
     admin_audit_log_deleted: auditResult.meta.changes,
+    ...recovery,
+  };
+}
+
+/** Each invocation has a fixed write budget. Pending and quarantined evidence
+ * is excluded; a quarantine also pins its original completed message digest. */
+export async function pruneCompletedRecovery(db: D1Database): Promise<{
+  recovery_payloads_cleared: number; recovery_batches_deleted: number;
+  email_payloads_cleared: number; email_spool_deleted: number;
+}> {
+  const schema = await db.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
+  const counts = {recovery_payloads_cleared:0,recovery_batches_deleted:0,email_payloads_cleared:0,email_spool_deleted:0};
+  if (schema?.value !== '13') return counts;
+  const results = await db.batch([
+    db.prepare(`UPDATE bank_recovery_batches SET cipher=NULL,key_version=NULL
+      WHERE id IN (SELECT id FROM bank_recovery_batches WHERE state='completed' AND cipher IS NOT NULL ORDER BY completed_at,id LIMIT 500)`),
+    db.prepare(`DELETE FROM bank_recovery_batches WHERE id IN (SELECT id FROM bank_recovery_batches
+      WHERE state='completed' AND completed_at<datetime('now','-7 days') ORDER BY completed_at,id LIMIT 500)`),
+    db.prepare(`UPDATE authenticated_email_spool SET cipher=NULL,key_version=NULL WHERE id IN
+      (SELECT id FROM authenticated_email_spool WHERE state='completed' AND cipher IS NOT NULL ORDER BY completed_at,id LIMIT 500)`),
+    db.prepare(`DELETE FROM authenticated_email_spool WHERE id IN (SELECT s.id FROM authenticated_email_spool s
+      WHERE s.state='completed' AND s.completed_at<datetime('now','-7 days')
+      AND NOT EXISTS (SELECT 1 FROM authenticated_email_spool q WHERE q.message_key=s.message_key AND q.state='quarantined')
+      ORDER BY s.completed_at,s.id LIMIT 500)`),
+  ]);
+  return {
+    recovery_payloads_cleared:results[0]!.meta.changes,recovery_batches_deleted:results[1]!.meta.changes,
+    email_payloads_cleared:results[2]!.meta.changes,email_spool_deleted:results[3]!.meta.changes,
   };
 }

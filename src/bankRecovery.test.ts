@@ -136,6 +136,19 @@ describe('complete BankSync facts and recovery',()=>{
     release(statement());await first;
     expect(sqlite.prepare('SELECT count(*) AS n FROM transactions').get()).toEqual({n:1});
   });
+  it('does not spool or advance a response from an in-flight credential that was rotated',async()=>{
+    const {db,sqlite,account}=await setup();let release!:(value:Response)=>void;
+    vi.stubGlobal('fetch',vi.fn(()=>new Promise<Response>(resolve=>release=resolve)));
+    const pending=recoverBankAccount(db,account,env);
+    await vi.waitFor(()=>expect(release).toBeTypeOf('function'));
+    const replacement=await encryptSecret('replacement-fixture-token',env);
+    sqlite.prepare('UPDATE bank_accounts SET api_token_cipher=? WHERE id=?').run(replacement.cipher,account.id);
+    release(statement());
+    await expect(pending).rejects.toThrow('bank_poll_lease_lost');
+    expect(sqlite.prepare('SELECT count(*) AS n FROM transactions').get()).toEqual({n:0});
+    expect(sqlite.prepare('SELECT state,cipher FROM bank_recovery_batches').get()).toEqual({state:'fetching',cipher:null});
+    expect(sqlite.prepare('SELECT api_reconciled_through FROM bank_accounts').get()).toEqual({api_reconciled_through:null});
+  });
   it('rejects a wrong-account snapshot and recovers after the token/account is corrected',async()=>{
     const {db,sqlite,account}=await setup();
     const fetch=vi.fn().mockImplementation(()=>statement());vi.stubGlobal('fetch',fetch);
