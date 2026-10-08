@@ -1,7 +1,13 @@
-import type { D1Database, R2Bucket } from '@cloudflare/workers-types';
+import type { D1Database, R2Bucket, R2UploadedPart } from '@cloudflare/workers-types';
 import { Buffer } from 'node:buffer';
+import { createCipheriv } from 'node:crypto';
+import { sqlDumpChunks } from './backupSql';
+import {acquireBackupWindow,drainRecoveryWriters} from './backupWindow';
+import {recoveryMaintenanceEnabled} from './recoveryMaintenance';
 
 export interface BackupConfig {
+  /** Privileged operator has already established a manual maintenance window. */
+  reuseMaintenanceWindow?: boolean;
   /** R2 bucket binding. Undefined → backup disabled (dev mode). */
   bucket: R2Bucket | undefined;
   /** Identifier prefix in R2 keys: e.g. 'banksync-prod' → keys like banksync-prod-YYYYMMDD.sql */
@@ -140,58 +146,64 @@ function dateKey(d: Date = new Date()): string {
   return `${year}${month}${day}`;
 }
 
-function escapeSqlString(s: string): string {
-  return s.replace(/'/g, "''");
+/** Collect a SQL dump for local tooling; production streams the same serializer. */
+export async function buildSqlDump(db:D1Database):Promise<{sql:string;rowCounts:Record<string,number>}> {
+  const rowCounts:Record<string,number>={},chunks:string[]=[];
+  for await(const chunk of sqlDumpChunks(db,TABLES,rowCounts))chunks.push(chunk);
+  return {sql:chunks.join(''),rowCounts};
 }
 
-function sqlValue(v: unknown): string {
-  if (v === null || v === undefined) return 'NULL';
-  if (typeof v === 'number') {
-    return Number.isFinite(v) ? String(v) : 'NULL';
+/** Keep only one SQL page and one 5 MiB encrypted R2 part in memory. */
+async function uploadEncryptedDump(db:D1Database,cfg:BackupConfig,key:string):Promise<{size:number;rowCounts:Record<string,number>}> {
+  const keyBytes=fromBase64(cfg.encryptionKey!);
+  if(keyBytes.byteLength!==32)throw new Error('backup_encryption_key_must_be_32_bytes');
+  const metadata={format:'banksync-backup' as const,version:1 as const,key_version:cfg.keyVersion!,algorithm:'AES-256-GCM' as const,created_at:new Date().toISOString()};
+  const iv=crypto.getRandomValues(new Uint8Array(12)),cipher=createCipheriv('aes-256-gcm',keyBytes,iv,{authTagLength:16});
+  cipher.setAAD(backupAad(metadata));
+  const schema=await db.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
+  let expectedRows=0;
+  for(const table of TABLES){
+    if(Number(schema?.value??0)<11&&['bank_recovery_batches','authenticated_email_spool'].includes(table))continue;
+    if(Number(schema?.value??0)<12&&['physical_accounts','account_aliases','payment_reference_grants','payment_references','payment_reference_conflicts'].includes(table))continue;
+    if(Number(schema?.value??0)<13&&table==='fio_poll_cursors')continue;
+    const filter=table==='schema_meta'?" WHERE key NOT IN ('backup_maintenance_owner','api_sync_lease_until')":'';
+    const count=await db.prepare(`SELECT COUNT(*) AS n FROM ${table}${filter}`).first<{n:number}>();expectedRows+=count?.n??0;
   }
-  if (typeof v === 'boolean') return v ? '1' : '0';
-  return `'${escapeSqlString(String(v))}'`;
-}
-
-/**
- * Export all banksync tables to a SQL dump string.
- * Each row becomes `INSERT INTO <table> (...) VALUES (...);`.
- * Headers include schema_meta version + timestamp.
- *
- * NULL values: emit literal `NULL`. String values: SQL-escape (' → '').
- */
-export async function buildSqlDump(db: D1Database): Promise<{
-  sql: string;
-  rowCounts: Record<string, number>;
-}> {
-  const lines: string[] = [];
-  lines.push(`-- banksync backup ${new Date().toISOString()}`);
-
-  const versionRow = await db.prepare(`SELECT value FROM schema_meta WHERE key = 'version'`).first<{ value: string }>();
-  lines.push(`-- schema_version=${versionRow?.value ?? 'unknown'}`);
-  lines.push(`-- restore: re-apply migrations then load this file`);
-  lines.push('');
-
-  const rowCounts: Record<string, number> = {};
-  for (const table of TABLES) {
-    if(Number(versionRow?.value??0)<11 && ['bank_recovery_batches','authenticated_email_spool'].includes(table))continue;
-    if(Number(versionRow?.value??0)<12 && ['physical_accounts','account_aliases','payment_reference_grants','payment_references','payment_reference_conflicts'].includes(table))continue;
-    if(Number(versionRow?.value??0)<13 && table==='fio_poll_cursors')continue;
-    const r = await db.prepare(`SELECT * FROM ${table}`).all<Record<string, unknown>>();
-    rowCounts[table] = r.results.length;
-    if (r.results.length === 0) continue;
-
-    const cols = Object.keys(r.results[0]!);
-    lines.push(`-- ${table} (${r.results.length} rows)`);
-    const insert = table === 'schema_meta' ? 'INSERT OR REPLACE INTO' : 'INSERT INTO';
-    for (const row of r.results) {
-      const values = cols.map(c => sqlValue(table==='physical_accounts' && c==='allocation_enabled'?0:row[c])).join(', ');
-      lines.push(`${insert} ${table} (${cols.join(', ')}) VALUES (${values});`);
+  const rowCounts:Record<string,number>={},parts:R2UploadedPart[]=[];
+  const upload=await cfg.bucket!.createMultipartUpload(key,{httpMetadata:{contentType:'application/octet-stream'},customMetadata:{banksync_table_count:String(TABLES.length),banksync_backup_format:'aes-256-gcm-v1',banksync_backup_key_version:String(cfg.keyVersion),banksync_total_rows:String(expectedRows)}});
+  const part=new Uint8Array(5*1024*1024);let used=0,total=0,carry=Buffer.alloc(0);
+  async function write(bytes:Uint8Array) {
+    total+=bytes.byteLength;
+    for(let offset=0;offset<bytes.byteLength;) {
+      const take=Math.min(part.byteLength-used,bytes.byteLength-offset);part.set(bytes.subarray(offset,offset+take),used);used+=take;offset+=take;
+      if(used===part.byteLength){parts.push(await upload.uploadPart(parts.length+1,part));used=0;}
     }
-    lines.push('');
   }
-
-  return { sql: lines.join('\n'), rowCounts };
+  async function writeCipher(bytes:Uint8Array,final=false) {
+    const combined=carry.length?Buffer.concat([carry,bytes]):Buffer.from(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+    const end=final?combined.length:combined.length-combined.length%3;
+    if(end)await write(Buffer.from(combined.subarray(0,end).toString('base64')));
+    carry=Buffer.from(combined.subarray(end));
+  }
+  try {
+    await write(Buffer.from(JSON.stringify({...metadata,iv:base64(iv)}).slice(0,-1)+',"ciphertext":"'));
+    // Batch short statements before updating the cipher, without retaining a dump.
+    let pending:string[]=[],chars=0;
+    for await(const chunk of sqlDumpChunks(db,TABLES,rowCounts)) {
+      pending.push(chunk);chars+=chunk.length;
+      if(chars>=65536){await writeCipher(cipher.update(Buffer.from(pending.join(''))));pending=[];chars=0;}
+    }
+    if(chars)await writeCipher(cipher.update(Buffer.from(pending.join(''))));
+    await writeCipher(cipher.final());await writeCipher(cipher.getAuthTag(),true);
+    await write(Buffer.from('"}'));
+    if(used)parts.push(await upload.uploadPart(parts.length+1,part.subarray(0,used)));
+    if(Object.values(rowCounts).reduce((sum,n)=>sum+n,0)!==expectedRows)throw new Error('backup_snapshot_changed');
+    await upload.complete(parts);
+    return {size:total,rowCounts};
+  } catch(error) {
+    try{await upload.abort();}catch(abortError){throw new AggregateError([error,abortError],'backup_upload_abort_failed');}
+    throw error;
+  }
 }
 
 /**
@@ -205,19 +217,13 @@ export async function runBackupTick(db: D1Database, cfg: BackupConfig): Promise<
     return { uploaded: false, skipped_reason: 'backup_encryption_not_configured' };
   }
 
-  const { sql, rowCounts } = await buildSqlDump(db);
+  if(!Number.isInteger(cfg.keyVersion)||cfg.keyVersion<1)throw new Error('invalid_backup_key_version');
+  const release=await acquireBackupWindow(db);
+  if(!release && !(cfg.reuseMaintenanceWindow&&await recoveryMaintenanceEnabled(db)))return {uploaded:false,skipped_reason:'recovery_maintenance_busy'};
+  try {
+    await drainRecoveryWriters(db);
   const key = `${cfg.prefix}-${dateKey()}.sql.enc`;
-  const buf = await encryptBackup(sql, cfg.encryptionKey, cfg.keyVersion);
-
-  await cfg.bucket.put(key, buf, {
-    httpMetadata: { contentType: 'application/octet-stream' },
-    customMetadata: {
-      banksync_table_count: String(TABLES.length),
-      banksync_backup_format: 'aes-256-gcm-v1',
-      banksync_backup_key_version: String(cfg.keyVersion),
-      banksync_total_rows: String(Object.values(rowCounts).reduce((a, b) => a + b, 0)),
-    },
-  });
+  const {size: sizeBytes,rowCounts}=await uploadEncryptedDump(db,cfg,key);
 
   // Prune older keys, keep `retain` newest
   const retain = cfg.retain ?? 8;
@@ -231,8 +237,9 @@ export async function runBackupTick(db: D1Database, cfg: BackupConfig): Promise<
   return {
     uploaded: true,
     key,
-    size_bytes: buf.byteLength,
+    size_bytes: sizeBytes,
     table_row_counts: rowCounts,
     pruned_keys: toPrune,
   };
+  } finally {if(release)await release();}
 }
