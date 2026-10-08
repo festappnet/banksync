@@ -17,6 +17,8 @@
     "scripts/decrypt-backup.mjs",
     "README.md",
     "docs/guide.md",
+    "docs/operations.md",
+    "docs/payment-references.md",
     "docs/security-hardening-rollout.md",
     "LICENSE"
   ],

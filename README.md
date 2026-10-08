@@ -12,15 +12,15 @@ deduplicates and retries delivery; your application handles payment matching.
 pnpm add @festapp/banksync
 ```
 
-Verify the raw webhook body with `verifyWebhook` and atomically claim
-`event.delivery_id` before processing a payment.
+Verify the raw webhook body with `verifyWebhook` and commit processing atomically
+with a unique `event.delivery_id`, then return a delivery receipt.
 See the [webhook example](docs/guide.md#webhook-contract) and
 [integration contract](docs/guide.md#version-02-integration-contract).
 
 ## Documentation
 
-- [Integration, migrations and operations](docs/guide.md)
-- [Deploy the Worker](docs/guide.md#deploy-the-worker) - Node.js 20+, pnpm and Cloudflare
+- [Integration and webhook example](docs/guide.md)
+- [Deploy the Worker](docs/operations.md#deploy-the-worker) - Node.js 20+, pnpm and Cloudflare
 - [Security and rollout](docs/security-hardening-rollout.md)
 - [npm package](https://www.npmjs.com/package/@festapp/banksync) and [releases](https://github.com/festappnet/banksync/releases)
 
