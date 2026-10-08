@@ -3,7 +3,7 @@ import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { D1Database, D1Result, D1PreparedStatement, R2Bucket, R2Object } from '@cloudflare/workers-types';
-import { buildSqlDump, runBackupTick as rawRunBackupTick, decryptBackup, TABLES, BACKUP_EXCLUDED } from './backup';
+import { buildSqlDump, runBackupTick as rawRunBackupTick, encryptBackup, decryptBackup, TABLES, BACKUP_EXCLUDED } from './backup';
 
 const TEST_BACKUP_KEY = btoa('k'.repeat(32));
 function runBackupTick(db: D1Database, cfg: Parameters<typeof rawRunBackupTick>[1]) {
@@ -351,6 +351,15 @@ describe('backup', () => {
       const envelope = JSON.parse(new TextDecoder().decode(bytes));
       envelope.ciphertext = envelope.ciphertext.slice(0, -2) + 'AA';
       await expect(decryptBackup(new TextEncoder().encode(JSON.stringify(envelope)), TEST_BACKUP_KEY)).rejects.toThrow();
+    });
+
+    it('round-trips a multi-megabyte Unicode dump without changing the envelope format', async () => {
+      const sql = "-- Žluťoučký bankovní dump\n".repeat(200000);
+      const bytes = await encryptBackup(sql, TEST_BACKUP_KEY, 1);
+      const envelope = JSON.parse(new TextDecoder().decode(bytes));
+      expect(envelope).toMatchObject({format:'banksync-backup',version:1,algorithm:'AES-256-GCM',key_version:1});
+      await expect(decryptBackup(bytes, TEST_BACKUP_KEY)).resolves.toBe(sql);
+      await expect(encryptBackup(sql, `${TEST_BACKUP_KEY}!`, 1)).rejects.toThrow();
     });
 
     it('filename uses YYYYMMDD format (e.g. 20260508)', async () => {

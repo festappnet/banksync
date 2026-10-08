@@ -1,4 +1,5 @@
 import type { D1Database, R2Bucket } from '@cloudflare/workers-types';
+import { Buffer } from 'node:buffer';
 
 export interface BackupConfig {
   /** R2 bucket binding. Undefined → backup disabled (dev mode). */
@@ -66,14 +67,17 @@ export interface EncryptedBackupEnvelope {
 }
 
 function base64(bytes: Uint8Array): string {
-  let value = '';
-  for (const byte of bytes) value += String.fromCharCode(byte);
-  return btoa(value);
+  // Byte-by-byte string concatenation exceeds the Worker memory budget on
+  // real SQL dumps. Encode the existing buffer without copying its bytes.
+  return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('base64');
 }
 
 function fromBase64(value: string): Uint8Array {
+  // Preserve strict Base64 decoding and avoid a temporary array of numbers.
   const decoded = atob(value);
-  return Uint8Array.from(decoded, char => char.charCodeAt(0));
+  const bytes = new Uint8Array(decoded.length);
+  for (let i = 0; i < decoded.length; i++) bytes[i] = decoded.charCodeAt(i);
+  return bytes;
 }
 
 async function importBackupKey(encoded: string): Promise<CryptoKey> {
