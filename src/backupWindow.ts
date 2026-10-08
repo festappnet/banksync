@@ -3,9 +3,10 @@ import {recoveryMaintenanceEnabled} from './recoveryMaintenance';
 
 /** A crashed backup cannot leave recovery paused indefinitely. Manual windows
  * have no backup owner and are never automatically expired. */
-export async function acquireBackupWindow(db:D1Database):Promise<(()=>Promise<void>)|null> {
+export async function acquireBackupWindow(db:D1Database):Promise<{owner:string;expiresAt:number;release:()=>Promise<void>}|null> {
   if(await recoveryMaintenanceEnabled(db))return null;
-  const owner=JSON.stringify({token:crypto.randomUUID(),expiresAt:new Date(Date.now()+15*60000).toISOString()});
+  const expiresAt=Date.now()+15*60000;
+  const owner=JSON.stringify({token:crypto.randomUUID(),expiresAt:new Date(expiresAt).toISOString()});
   const claim=await db.prepare(`INSERT INTO schema_meta(key,value) SELECT 'backup_maintenance_owner',?
     WHERE NOT EXISTS(SELECT 1 FROM schema_meta WHERE key='recovery_maintenance' AND value='on')
     ON CONFLICT(key) DO NOTHING`).bind(owner).run();
@@ -15,10 +16,10 @@ export async function acquireBackupWindow(db:D1Database):Promise<(()=>Promise<vo
     AND NOT EXISTS(SELECT 1 FROM schema_meta WHERE key='recovery_maintenance' AND value='on')
     ON CONFLICT(key) DO UPDATE SET value=excluded.value`).bind(owner).run();
   if(!marker.meta.changes){await db.prepare("DELETE FROM schema_meta WHERE key='backup_maintenance_owner' AND value=?").bind(owner).run();return null;}
-  return async()=>{
+  return {owner,expiresAt,release:async()=>{
     await db.prepare("UPDATE schema_meta SET value='off' WHERE key='recovery_maintenance' AND EXISTS(SELECT 1 FROM schema_meta WHERE key='backup_maintenance_owner' AND value=?)").bind(owner).run();
     await db.prepare("DELETE FROM schema_meta WHERE key='backup_maintenance_owner' AND value=?").bind(owner).run();
-  };
+  }};
 }
 
 export async function drainRecoveryWriters(db:D1Database):Promise<void> {

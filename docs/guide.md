@@ -125,7 +125,14 @@ changes. Set `eventVersion: "2"` when consuming version 2 events.
 - **Operator visibility:** public HTTP exposes only `GET /health`. `/status` and
   `/health/deep` require administrator authentication.
 - **Backups:** optional R2 backups are AES-256-GCM `.sql.enc` envelopes and omit
-  ephemeral idempotency and rate-limit tables.
+  ephemeral idempotency, rate-limit and poll-lease tables. SQL is read in bounded
+  pages, encrypted continuously and uploaded in 5 MiB multipart parts. Restores
+  preserve deleted AUTOINCREMENT identities and start with recovery paused and
+  payment allocation disabled. Apply the same schema migrations before loading.
+  A backup owns a maintenance window for at most 15 minutes; it drains in-flight
+  bank/email claims and verifies ownership before publishing. Configuration writes
+  return `503` with `Retry-After: 60` during maintenance. Crashed backup windows
+  expire automatically; operator-created manual windows remain paused.
 
 Decrypt a backup into a new mode-0600 file without printing plaintext:
 

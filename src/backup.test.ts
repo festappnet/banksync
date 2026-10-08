@@ -13,6 +13,7 @@ function runBackupTick(db: D1Database, cfg: Parameters<typeof rawRunBackupTick>[
 // ---- D1 facade over better-sqlite3 ----
 
 function wrapAsD1(sqlite: Database.Database): D1Database {
+  const reads=new WeakMap<D1PreparedStatement,()=>D1Result<Record<string,unknown>>>();
   function prepare(sql: string): D1PreparedStatement {
     let boundArgs: unknown[] = [];
 
@@ -65,10 +66,14 @@ function wrapAsD1(sqlite: Database.Database): D1Database {
       },
     } as unknown as D1PreparedStatement;
 
+    reads.set(stmt,()=>{
+      const s=sqlite.prepare(sql),results=s.all(...(boundArgs as Parameters<typeof s.all>)) as Record<string,unknown>[];
+      return {results,success:true,meta:{changes:0,last_row_id:0,duration:0,size_after:0,rows_read:results.length,rows_written:0,changed_db:false}};
+    });
     return stmt;
   }
 
-  return { prepare } as unknown as D1Database;
+  return { prepare, async batch(statements:D1PreparedStatement[]){return sqlite.transaction(()=>statements.map(stmt=>reads.get(stmt)!()))();} } as unknown as D1Database;
 }
 
 // ---- R2 mock ----
@@ -391,6 +396,30 @@ describe('backup', () => {
       expect(restored.prepare("SELECT value FROM schema_meta WHERE key='backup_maintenance_owner'").get()).toBeUndefined();
       expect(restored.prepare("SELECT value FROM schema_meta WHERE key='recovery_maintenance'").get()).toEqual({value:'on'});
       expect(sqlite.prepare("SELECT value FROM schema_meta WHERE key='recovery_maintenance'").get()).toEqual({value:'off'});
+    });
+
+    it('preserves deleted AUTOINCREMENT identities across restore', async () => {
+      const {db,sqlite}=makeTestDb();
+      sqlite.exec("INSERT INTO bank_accounts(id,account_number,pairing_code) VALUES(900,'1234/2010','deleted');DELETE FROM bank_accounts WHERE id=900");
+      const {sql}=await buildSqlDump(db),restored=new Database(':memory:');applyMigrations(restored);restored.exec(sql);
+      restored.exec("INSERT INTO bank_accounts(account_number,pairing_code) VALUES('5678/2010','new')");
+      expect(restored.prepare("SELECT id FROM bank_accounts WHERE pairing_code='new'").get()).toEqual({id:901});
+    });
+
+    it('aborts before publication if ownership changes during upload', async () => {
+      const {db,sqlite}=makeTestDb(),{bucket,storage}=makeMockR2();
+      const create=bucket.createMultipartUpload.bind(bucket);
+      bucket.createMultipartUpload=async(...args)=>{
+        const upload=await create(...args);
+        return {...upload,uploadPart:async(...partArgs)=>{
+          const part=await upload.uploadPart(...partArgs);
+          sqlite.prepare("UPDATE schema_meta SET value='replacement-owner' WHERE key='backup_maintenance_owner'").run();
+          return part;
+        }};
+      };
+      await expect(runBackupTick(db,{bucket,prefix:'lost-owner'})).rejects.toThrow('backup_window_lost');
+      expect(storage.aborted).toBe(1);expect(storage.objects.size).toBe(0);
+      expect(sqlite.prepare("SELECT value FROM schema_meta WHERE key='recovery_maintenance'").get()).toEqual({value:'on'});
     });
 
     it('aborts a failed multipart upload and resumes recovery', async () => {
