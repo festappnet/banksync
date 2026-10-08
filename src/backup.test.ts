@@ -3,7 +3,7 @@ import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { D1Database, D1Result, D1PreparedStatement, R2Bucket, R2Object } from '@cloudflare/workers-types';
-import { buildSqlDump, runBackupTick as rawRunBackupTick, decryptBackup, TABLES, BACKUP_EXCLUDED } from './backup';
+import { buildSqlDump, runBackupTick as rawRunBackupTick, encryptBackup, decryptBackup, TABLES, BACKUP_EXCLUDED } from './backup';
 
 const TEST_BACKUP_KEY = btoa('k'.repeat(32));
 function runBackupTick(db: D1Database, cfg: Parameters<typeof rawRunBackupTick>[1]) {
@@ -74,11 +74,13 @@ function wrapAsD1(sqlite: Database.Database): D1Database {
 // ---- R2 mock ----
 
 interface MockR2Storage {
+  partSizes: number[];
+  aborted: number;
   objects: Map<string, { key: string; data: Uint8Array; metadata?: Record<string, string> | undefined }>;
 }
 
 function makeMockR2(): { bucket: R2Bucket; storage: MockR2Storage } {
-  const storage: MockR2Storage = { objects: new Map() };
+  const storage: MockR2Storage = { objects: new Map(), partSizes: [], aborted: 0 };
 
   const bucket = {
     async put(
@@ -114,6 +116,20 @@ function makeMockR2(): { bucket: R2Bucket; storage: MockR2Storage } {
         httpEtag: 'mock-http-etag',
         uploaded: new Date(),
       } as any;
+    },
+
+    async createMultipartUpload(key: string, options?: {customMetadata?:Record<string,string>}) {
+      const parts=new Map<number,Uint8Array>();
+      return {key,uploadId:'fixture-upload',
+        async uploadPart(partNumber:number,value:Uint8Array){storage.partSizes.push(value.byteLength);parts.set(partNumber,new Uint8Array(value));return {partNumber,etag:`part-${partNumber}`};},
+        async complete(uploaded:{partNumber:number;etag:string}[]){
+          const bytes=uploaded.map(p=>parts.get(p.partNumber)!);const data=new Uint8Array(bytes.reduce((n,b)=>n+b.byteLength,0));let offset=0;
+          for(const bytesPart of bytes){data.set(bytesPart,offset);offset+=bytesPart.byteLength;}
+          storage.objects.set(key,{key,data,...(options?.customMetadata?{metadata:options.customMetadata}:{})});
+          return {key,size:data.byteLength};
+        },
+        async abort(){parts.clear();storage.aborted++;},
+      };
     },
 
     async list(options?: { prefix?: string; limit?: number; cursor?: string }) {
@@ -351,6 +367,39 @@ describe('backup', () => {
       const envelope = JSON.parse(new TextDecoder().decode(bytes));
       envelope.ciphertext = envelope.ciphertext.slice(0, -2) + 'AA';
       await expect(decryptBackup(new TextEncoder().encode(JSON.stringify(envelope)), TEST_BACKUP_KEY)).rejects.toThrow();
+    });
+
+    it('round-trips a multi-megabyte Unicode dump without changing the envelope format', async () => {
+      const sql = "-- Žluťoučký bankovní dump\n".repeat(200000);
+      const bytes = await encryptBackup(sql, TEST_BACKUP_KEY, 1);
+      const envelope = JSON.parse(new TextDecoder().decode(bytes));
+      expect(envelope).toMatchObject({format:'banksync-backup',version:1,algorithm:'AES-256-GCM',key_version:1});
+      await expect(decryptBackup(bytes, TEST_BACKUP_KEY)).resolves.toBe(sql);
+      await expect(encryptBackup(sql, `${TEST_BACKUP_KEY}!`, 1)).rejects.toThrow();
+    });
+
+    it('streams multiple full-size parts and restores a large Unicode row', async () => {
+      const {db,sqlite}=makeTestDb(),{bucket,storage}=makeMockR2();
+      const label='Bank 🦦 '.repeat(900000);
+      sqlite.prepare("INSERT INTO bank_accounts(account_number,pairing_code,label) VALUES('1234/2010','large',?)").run(label);
+      const result=await runBackupTick(db,{bucket,prefix:'large'});
+      expect(storage.partSizes.length).toBeGreaterThan(1);
+      expect(storage.partSizes.slice(0,-1).every(size=>size===5*1024*1024)).toBe(true);
+      const restored=new Database(':memory:');applyMigrations(restored);
+      restored.exec(await decryptBackup(storage.objects.get(result.key!)!.data,TEST_BACKUP_KEY));
+      expect(restored.prepare("SELECT label FROM bank_accounts WHERE pairing_code='large'").get()).toEqual({label});
+      expect(restored.prepare("SELECT value FROM schema_meta WHERE key='backup_maintenance_owner'").get()).toBeUndefined();
+      expect(restored.prepare("SELECT value FROM schema_meta WHERE key='recovery_maintenance'").get()).toEqual({value:'on'});
+      expect(sqlite.prepare("SELECT value FROM schema_meta WHERE key='recovery_maintenance'").get()).toEqual({value:'off'});
+    });
+
+    it('aborts a failed multipart upload and resumes recovery', async () => {
+      const {db,sqlite}=makeTestDb(),{bucket,storage}=makeMockR2();
+      const create=bucket.createMultipartUpload.bind(bucket);
+      bucket.createMultipartUpload=async(...args)=>({...await create(...args),uploadPart:async()=>{throw new Error('part_failed');}});
+      await expect(runBackupTick(db,{bucket,prefix:'failed'})).rejects.toThrow('part_failed');
+      expect(storage.aborted).toBe(1);expect(storage.objects.size).toBe(0);
+      expect(sqlite.prepare("SELECT value FROM schema_meta WHERE key='recovery_maintenance'").get()).toEqual({value:'off'});
     });
 
     it('filename uses YYYYMMDD format (e.g. 20260508)', async () => {

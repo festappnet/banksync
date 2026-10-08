@@ -936,6 +936,12 @@ async function dispatch(
   bodyText: string,
 ): Promise<Response> {
 
+  if(!['GET','HEAD','OPTIONS'].includes(req.method)
+    && !/^\/bank-accounts\/\d+\/fio-sync$/.test(url.pathname)
+    && await recoveryMaintenanceEnabled(env.DB)) {
+    return jsonResponse({error:'recovery_maintenance_active'},503,{'Retry-After':'60'});
+  }
+
   const referenceRoute=url.pathname.match(/^\/bank-accounts\/(\d+)\/(payment-references|payment-reference-admin|account-health)$/);
   if(referenceRoute){
     const version=await env.DB.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
