@@ -1,5 +1,9 @@
 # Execute: Secure BankSync public release
 
+> Historical record: the security rollout completed on 2026-08-31.
+> For current deployment and recovery, use [operations](../operations.md).
+> Preserve the evidence below; these are not instructions to repeat the rollout.
+
 Work in `/Users/miakh/source/banksync` and the explicitly named Mendelio consumer
 paths in `/Users/miakh/source/roman_seznamka`.
 

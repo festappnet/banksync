@@ -1,5 +1,9 @@
 # Secure BankSync public release
 
+> Historical record: the security rollout completed on 2026-08-31.
+> For current deployment and recovery, use [operations](../operations.md).
+> Preserve the evidence below; these are not instructions to repeat the rollout.
+
 Date: 2026-08-29  
 Status: Complete; protected npm release and production verification finished 2026-08-31
 Verification: release
