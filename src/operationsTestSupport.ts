@@ -20,7 +20,7 @@ export function operationsDb(version = 13) {
       async all<T>() {return result(0,sqlite.prepare(sql).all(...args) as Record<string,unknown>[]) as D1Result<T>;},
       async run() {return runs.get(statement)!();},
     } as D1PreparedStatement;
-    runs.set(statement,()=>{const info=sqlite.prepare(sql).run(...args);return result(info.changes,[],Number(info.lastInsertRowid));});
+    runs.set(statement,()=>{const prepared=sqlite.prepare(sql);if(prepared.reader)return result(0,prepared.all(...args) as Record<string,unknown>[]);const info=prepared.run(...args);return result(info.changes,[],Number(info.lastInsertRowid));});
     return statement;
   }
   const db = {prepare,async batch(statements:D1PreparedStatement[]) {

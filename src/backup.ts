@@ -1,7 +1,7 @@
 import type { D1Database, R2Bucket, R2UploadedPart } from '@cloudflare/workers-types';
 import { Buffer } from 'node:buffer';
 import { createCipheriv } from 'node:crypto';
-import { sqlDumpChunks } from './backupSql';
+import { sqlDumpChunks,prepareSqlDump } from './backupSql';
 import {acquireBackupWindow,drainRecoveryWriters} from './backupWindow';
 import {recoveryMaintenanceEnabled} from './recoveryMaintenance';
 
@@ -154,21 +154,14 @@ export async function buildSqlDump(db:D1Database):Promise<{sql:string;rowCounts:
 }
 
 /** Keep only one SQL page and one 5 MiB encrypted R2 part in memory. */
-async function uploadEncryptedDump(db:D1Database,cfg:BackupConfig,key:string):Promise<{size:number;rowCounts:Record<string,number>}> {
+async function uploadEncryptedDump(db:D1Database,cfg:BackupConfig,key:string,validateWindow:()=>Promise<void>):Promise<{size:number;rowCounts:Record<string,number>}> {
   const keyBytes=fromBase64(cfg.encryptionKey!);
   if(keyBytes.byteLength!==32)throw new Error('backup_encryption_key_must_be_32_bytes');
   const metadata={format:'banksync-backup' as const,version:1 as const,key_version:cfg.keyVersion!,algorithm:'AES-256-GCM' as const,created_at:new Date().toISOString()};
   const iv=crypto.getRandomValues(new Uint8Array(12)),cipher=createCipheriv('aes-256-gcm',keyBytes,iv,{authTagLength:16});
   cipher.setAAD(backupAad(metadata));
-  const schema=await db.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
-  let expectedRows=0;
-  for(const table of TABLES){
-    if(Number(schema?.value??0)<11&&['bank_recovery_batches','authenticated_email_spool'].includes(table))continue;
-    if(Number(schema?.value??0)<12&&['physical_accounts','account_aliases','payment_reference_grants','payment_references','payment_reference_conflicts'].includes(table))continue;
-    if(Number(schema?.value??0)<13&&table==='fio_poll_cursors')continue;
-    const filter=table==='schema_meta'?" WHERE key NOT IN ('backup_maintenance_owner','api_sync_lease_until')":'';
-    const count=await db.prepare(`SELECT COUNT(*) AS n FROM ${table}${filter}`).first<{n:number}>();expectedRows+=count?.n??0;
-  }
+  const plan=await prepareSqlDump(db,TABLES);
+  const expectedRows=plan.tables.reduce((sum,table)=>sum+table.n,0);
   const rowCounts:Record<string,number>={},parts:R2UploadedPart[]=[];
   const upload=await cfg.bucket!.createMultipartUpload(key,{httpMetadata:{contentType:'application/octet-stream'},customMetadata:{banksync_table_count:String(TABLES.length),banksync_backup_format:'aes-256-gcm-v1',banksync_backup_key_version:String(cfg.keyVersion),banksync_total_rows:String(expectedRows)}});
   const part=new Uint8Array(5*1024*1024);let used=0,total=0,carry=Buffer.alloc(0);
@@ -189,7 +182,7 @@ async function uploadEncryptedDump(db:D1Database,cfg:BackupConfig,key:string):Pr
     await write(Buffer.from(JSON.stringify({...metadata,iv:base64(iv)}).slice(0,-1)+',"ciphertext":"'));
     // Batch short statements before updating the cipher, without retaining a dump.
     let pending:string[]=[],chars=0;
-    for await(const chunk of sqlDumpChunks(db,TABLES,rowCounts)) {
+    for await(const chunk of sqlDumpChunks(db,TABLES,rowCounts,plan)) {
       pending.push(chunk);chars+=chunk.length;
       if(chars>=65536){await writeCipher(cipher.update(Buffer.from(pending.join(''))));pending=[];chars=0;}
     }
@@ -197,7 +190,8 @@ async function uploadEncryptedDump(db:D1Database,cfg:BackupConfig,key:string):Pr
     await writeCipher(cipher.final());await writeCipher(cipher.getAuthTag(),true);
     await write(Buffer.from('"}'));
     if(used)parts.push(await upload.uploadPart(parts.length+1,part.subarray(0,used)));
-    if(Object.values(rowCounts).reduce((sum,n)=>sum+n,0)!==expectedRows)throw new Error('backup_snapshot_changed');
+    if(plan.tables.some(table=>rowCounts[table.name]!==table.n))throw new Error('backup_snapshot_changed');
+    await validateWindow();
     await upload.complete(parts);
     return {size:total,rowCounts};
   } catch(error) {
@@ -223,7 +217,11 @@ export async function runBackupTick(db: D1Database, cfg: BackupConfig): Promise<
   try {
     await drainRecoveryWriters(db);
   const key = `${cfg.prefix}-${dateKey()}.sql.enc`;
-  const {size: sizeBytes,rowCounts}=await uploadEncryptedDump(db,cfg,key);
+  const {size: sizeBytes,rowCounts}=await uploadEncryptedDump(db,cfg,key,async()=>{
+    if(!await recoveryMaintenanceEnabled(db))throw new Error('backup_window_lost');
+    if(release){const owner=await db.prepare("SELECT value FROM schema_meta WHERE key='backup_maintenance_owner'").first<{value:string}>();
+      if(owner?.value!==release.owner||Date.now()>=release.expiresAt)throw new Error('backup_window_lost');}
+  });
 
   // Prune older keys, keep `retain` newest
   const retain = cfg.retain ?? 8;
@@ -241,5 +239,5 @@ export async function runBackupTick(db: D1Database, cfg: BackupConfig): Promise<
     table_row_counts: rowCounts,
     pruned_keys: toPrune,
   };
-  } finally {if(release)await release();}
+  } finally {if(release)await release.release();}
 }
