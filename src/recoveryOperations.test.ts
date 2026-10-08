@@ -4,7 +4,7 @@ import {resolve} from 'node:path';
 import {operationsDb} from './operationsTestSupport';
 import {assertSchemaVersion,pruneCompletedRecovery} from './db';
 import {fetchFioDelta,fioMovementId,setFioPointerById} from './fio';
-import {buildSqlDump,TABLES,BACKUP_EXCLUDED} from './backup';
+import {buildSqlDump,encryptBackup,decryptBackup,TABLES,BACKUP_EXCLUDED} from './backup';
 
 afterEach(()=>vi.unstubAllGlobals());
 
@@ -58,10 +58,24 @@ describe('recovery operations schema and retention',()=>{
 
   it('backs up and restores the complete schema including bank cursors',async()=>{
     const {db,sqlite}=operationsDb();
-    sqlite.exec("INSERT INTO fio_poll_cursors(credential_hash,receiving_account,generation,bootstrap_from_date,last_committed_movement_id) VALUES('credential','CZ-fixture','generation','2026-10-01','9007199254740993')");
+    sqlite.exec(`PRAGMA foreign_keys=ON;
+      INSERT INTO webhook_consumers(app_id,callback_url,secret_cipher,secret_hash,secret_prefix) VALUES('fixture','https://fixture.example','encrypted-secret','hash','prefix');
+      INSERT INTO bank_accounts(id,account_number,pairing_code,owner_app_id) VALUES(1,'1234/2010','fixture','fixture');
+      INSERT INTO bank_recovery_batches(id,bank_account_id,from_date,to_date,state,cipher,key_version) VALUES('pending',1,'2026-10-01','2026-10-02','spooled','encrypted-statement',1);
+      INSERT INTO authenticated_email_spool(id,bank_account_id,message_key,body_sha256,cipher,key_version,state,attempts) VALUES
+      ('pending',1,'pending','digest-a','encrypted-pending',1,'pending',901),
+      ('quarantine',1,'original','digest-b','encrypted-conflict',1,'quarantined',2),
+      ('orphan',NULL,'unknown','digest-c','encrypted-orphan',1,'quarantined',1);
+      INSERT INTO fio_poll_cursors(credential_hash,receiving_account,generation,bootstrap_from_date,last_committed_movement_id) VALUES('credential','CZ-fixture','generation','2026-10-01','9007199254740993')`);
     const tables=sqlite.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as {name:string}[];
     expect(tables.filter(t=>!TABLES.includes(t.name)&&!BACKUP_EXCLUDED[t.name])).toEqual([]);
-    const dump=await buildSqlDump(db),restored=operationsDb();restored.sqlite.exec(dump.sql);
+    const dump=await buildSqlDump(db),restored=operationsDb();
+    const key=btoa('k'.repeat(32)),encrypted=await encryptBackup(dump.sql,key,1);
+    restored.sqlite.exec('PRAGMA foreign_keys=ON');
+    restored.sqlite.exec(await decryptBackup(encrypted,key));
+    expect(restored.sqlite.pragma('foreign_key_check')).toEqual([]);
+    expect(restored.sqlite.prepare('SELECT id,bank_account_id,state,cipher,attempts FROM authenticated_email_spool ORDER BY id').all()).toEqual(sqlite.prepare('SELECT id,bank_account_id,state,cipher,attempts FROM authenticated_email_spool ORDER BY id').all());
+    expect(restored.sqlite.prepare('SELECT id,state,cipher FROM bank_recovery_batches').all()).toEqual([{id:'pending',state:'spooled',cipher:'encrypted-statement'}]);
     expect(restored.sqlite.prepare('SELECT last_committed_movement_id FROM fio_poll_cursors').get()).toEqual({last_committed_movement_id:'9007199254740993'});
   });
 });
