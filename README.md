@@ -21,6 +21,7 @@ See the [webhook example](docs/guide.md#webhook-contract) and
 
 - [Integration and webhook example](docs/guide.md)
 - [Deploy the Worker](docs/operations.md#deploy-the-worker) - Node.js 20+, pnpm and Cloudflare
+- [Optional payment references](docs/payment-references.md)
 - [Security and rollout](docs/security-hardening-rollout.md)
 - [npm package](https://www.npmjs.com/package/@festapp/banksync) and [releases](https://github.com/festappnet/banksync/releases)
 

@@ -1,12 +1,16 @@
-# Security-hardening rollout gates
+# Security rollout reference
 
-These steps describe external state that source changes do not apply. Run them
-only with separate production authority. Never print account, transaction,
-secret, callback path/query, or message content.
+The initial hardening rollout is complete. Use this checklist when changing an
+existing installation's security boundary. Use the [operations guide](operations.md)
+for ordinary deployment and schema-13 recovery migration.
 
-## Read-only inventory
+Production changes require authority for the affected deployment and data.
+Keep diagnostics to sanitized counts and hostnames; do not print credentials,
+transaction data, tenant identifiers, message bodies or callback paths/queries.
 
-Run host/count-only D1 queries before enabling the release:
+## Inspect before changing
+
+Check callback hosts, cross-owner subscriptions and credential-shaped cache rows:
 
 ```sql
 SELECT lower(substr(callback_url, instr(callback_url, '://') + 3,
@@ -29,55 +33,43 @@ WHERE response_body LIKE '%"secret"%'
    OR response_body LIKE '%"admin_key"%';
 ```
 
-Review every cross-owner subscription. Record explicit approval for legitimate
-sharing and prepare deletion of all remaining rows; no row is grandfathered.
-Configure `CALLBACK_HOST_ALLOWLIST` from the reviewed exact hostname inventory,
-never from suffixes or URL paths.
+Review every shared subscription; retain only approved sharing. Build the exact
+callback allowlist from reviewed hosts. Inspect R2 object keys/dates only. If cache
+rows contained credentials, treat plaintext backups from that interval as affected.
 
-List R2 backup object keys/dates only. If the credential-shaped count is nonzero,
-treat all plaintext `.sql` objects created during the affected interval as
-credential-bearing.
+## Verify email trust
 
-## Trusted email ingress gate
+Establish the Cloudflare-owned authentication service ID and duplicate-header
+behavior from sanitized accepted/rejected evidence. Set `EMAIL_AUTHSERV_ID` and
+test a legitimate bank message plus a controlled spoof rejection. Leave ingestion
+paused if ownership of the authentication evidence cannot be established.
 
-Cloudflare documents envelope `from`/`to` and platform SPF-or-DKIM acceptance,
-but not a stable Authentication-Results authserv-id. Inspect one accepted and one
-rejected production header without logging message content. Establish the
-Cloudflare-owned authserv-id and duplicate-header behavior, set
-`EMAIL_AUTHSERV_ID`, then run one legitimate bank message and one controlled
-spoof rejection. Leave email ingest paused if ownership cannot be established.
+## Apply the cutover
 
-## Ordered production cutover
+1. Deploy tenant containment and verify a foreign subscription returns generic
+   403 without changing subscription or delivery rows.
+2. Set exact callback hosts, the verified email service ID and backup key version.
+   Store backup keys independently from R2.
+3. Apply only missing forward migrations. For a pre-hardening database this starts
+   with `0010_security_hardening.sql`; never reapply the baseline.
+4. Remove unapproved sharing. If credential-bearing cache rows existed, rotate
+   affected webhook/admin keys and update consumers atomically. Verify both ends
+   before deleting affected plaintext backups. Previous webhook secrets have a
+   24-hour grace period.
+5. Deploy the intended artifact and verify its recorded Cloudflare version is at
+   100%, accounting for concurrent deployments.
+6. Check public health, anonymous denial of detailed routes, authenticated health,
+   foreign-subscription denial, redirect rejection and one durable receipt for a
+   valid signed delivery.
 
-1. Deploy the tenant-containment Worker after the normal emergency approval and
-   prove a disposable foreign subscription returns the generic 403 without row
-   or delivery-job changes.
-2. Configure the exact callback allowlist, backup key version, and verified email
-   authserv-id. Store backup keys independently from R2.
-3. Apply only `0010_security_hardening.sql` to the production D1. Never apply the
-   squashed baseline to an existing database.
-4. Delete unapproved cross-owner subscriptions.
-5. If credential-shaped cache rows existed, rotate affected webhook/admin keys,
-   atomically update consumers, verify both ends, and only then delete affected
-   plaintext R2 backups. The 24-hour previous-webhook-secret grace is the only
-   bounded compatibility window.
-6. Deploy the intended Worker artifact, record its Cloudflare version ID, and
-   verify it is at 100% after checking for concurrent deployments.
-7. Smoke minimal public health, anonymous denial for detailed routes, admin
-   health, foreign-subscription denial, redirect rejection, and exactly one
-   durable billing receipt for one valid signed delivery.
+## Rollback and publication
 
-Rollback is binary-forward: only a Worker revision that retains tenant
-containment, admin-only detailed routes, callback policy, safe verification, and
-encrypted backups may be restored. Schema v10 and deletion of credential-bearing
-ephemeral data are not rolled back.
+Rollback only to a Worker retaining tenant containment, protected diagnostics,
+callback restrictions, safe webhook verification and encrypted backups. Do not
+roll back schema 10 or restore deleted credential-bearing cache data. Later
+schemas also require a compatible Worker.
 
-## Repository and publication controls
-
-Before creating a protected version tag, independently verify through GitHub's
-API/UI that main and `v*` tags cannot be force-pushed/deleted, required check and
-security jobs are enforced, reviewed PRs are required, secret scanning/push
-protection and Dependabot security updates are active, and Actions require SHA
-pinning. Configure npm trusted publishing for the `npm` environment. If either
-control plane is incomplete, the produced GitHub artifact is only a release
-candidate and must not be promoted as the canonical package.
+Before tagging, verify GitHub branch/tag protection, required checks and PRs,
+secret scanning/push protection, Dependabot security updates and pinned Actions.
+Configure npm trusted publishing for the `npm` environment. Incomplete controls
+mean the artifact remains a candidate, not a supported release.
