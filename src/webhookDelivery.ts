@@ -8,7 +8,6 @@ import {
   retryDelaySeconds,
   type OutcomeKind,
 } from './deliveryPolicy';
-import { enqueueRecoveryIfOpen, enqueueTerminalIncident } from './alertOutbox';
 
 // Cloudflare Queue is at-least-once. We own the job for this long once we hand a
 // message to the queue; only after the lease expires may a sweep re-open a job
@@ -279,7 +278,6 @@ export async function recordDeliveryOutcome(db: D1Database, args: {
   httpStatus?: number | null;
   error?: string | null;
   delaySeconds?: number;
-  alertService?: string;
   receipt?: WebhookDeliveryReceipt;
 }): Promise<OutcomeResult> {
   const { deliveryJobId, generation, dispatchToken, kind } = args;
@@ -358,11 +356,6 @@ export async function recordDeliveryOutcome(db: D1Database, args: {
   }>();
   if (!row) return { applied: false, status: 'not_found' };
   if (changes > 0) {
-    // Per-job alert outbox: a fresh terminal opens its own incident; a delivered
-    // transition closes any open incident with exactly one recovery.
-    const service = args.alertService ?? 'banksync';
-    if (row.status === 'terminal') await enqueueTerminalIncident(db, row, service);
-    else if (row.status === 'delivered') await enqueueRecoveryIfOpen(db, row, service);
     return { applied: true, status: row.status };
   }
   // No write applied. Distinguish absorbing-delivered from a stale fence.

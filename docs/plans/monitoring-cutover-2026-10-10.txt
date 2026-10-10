@@ -1,0 +1,39 @@
+BankSync operational monitoring cutover
+
+Owner and seam: BankSync owns durable bank ingestion/delivery facts. External
+monitors own polling, thresholds, incidents and notification delivery. Neither
+the public SDK nor Worker imports a Monitoring package or calls Mendelio alerts.
+
+Contract: optional GET /health/operations, protocol major 1, bearer token scoped
+to this read-only route. Missing/wrong token fails before database access.
+Responses are uncached numeric aggregates, never identifiers, bank data, secrets,
+callback URLs or exception text. Unsupported schema/unavailable storage returns
+503. The endpoint performs SELECTs only. All business APIs retain their auth.
+
+Execution:
+1. Add aggregate snapshot and authorization/error/privacy regression tests.
+2. Remove alert HTTP senders, scheduled drains, delivery hooks, their thresholds,
+   configuration and tests. Keep applied migrations immutable. Historical alert
+   tables remain backup-covered evidence only, with no live readers/writers.
+3. Add a bounded BankSync pull adapter in standalone Monitoring. Reuse canonical
+   scoped ingestion, incident/dead-man policy and delivery; no second outbox.
+   Monitoring owns the thresholds. Register heartbeat checks with endpoint as
+   parent to inhibit secondary alerts during transport failure.
+4. Remove the Mendelio alert bridge and its configuration/documentation. Release
+   the public package before updating the production composition's registry pin.
+5. Validate each owner. Production order: BankSync endpoint, Monitoring record
+   mode registration and fresh pull evidence, notification activation, retirement
+   of old pending notifications/credentials. Preserve historical evidence and
+   never replay bank jobs or quarantine messages as part of this migration.
+
+Invariants: no Monitoring outage can interrupt bank ingestion/delivery; no
+Monitoring read credential grants admin access; probe time/bytes are bounded;
+malformed/stale data fails closed; failures use fixed codes, not remote payloads;
+existing Monitoring projects and tutoring provider incidents are unaffected.
+
+Related audit fixes: keep webhook timeout active through receipt body consumption;
+validate resolved account ingest mode before checking durable email capability.
+
+Publication gates: Mendelio CLAUDE.md requires user confirmation of browser
+functionality before commits. Finish reviewable source changes and validation
+before requesting this gate; do not claim production cutover before deployment.

@@ -207,6 +207,24 @@ describe('backoffSeconds', () => {
 });
 
 describe('2xx happy path', () => {
+  it('keeps the HTTP deadline active while a receipt body stalls after headers', async () => {
+    const {env,sqlite}=await makeEnv('test-secret-stalled-receipt');
+    vi.useFakeTimers({toFake:['setTimeout','clearTimeout']});
+    try {
+      vi.spyOn(globalThis,'fetch').mockImplementation(async (_url,init)=>new Response(new ReadableStream({
+        start(controller) { init!.signal!.addEventListener('abort',()=>controller.error(new Error('aborted')), {once:true}); },
+      }),{status:200}));
+      const msg=makeMsg({attempts:1});
+      const work=handleQueueBatch(makeBatch([msg]),env);
+      for(let i=0;i<100&&!vi.getTimerCount();i++) await new Promise<void>(resolve=>setImmediate(resolve));
+      expect(vi.getTimerCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(10000);
+      await work;
+      expect(msg.ack).not.toHaveBeenCalled(); expect(msg.retry).toHaveBeenCalledOnce();
+      expect(sqlite.prepare('SELECT last_error FROM webhook_delivery_jobs WHERE id=1').get()).toEqual({last_error:'receipt_read_failed'});
+    }finally{vi.useRealTimers()}
+  });
+
   it('acks message, no retry, inserts webhook_log row with http_status=200', async () => {
     const secret = 'test-secret-happy';
     const { env, sqlite } = await makeEnv(secret);

@@ -75,25 +75,31 @@ merely by publishing a package.
 
 ### Monitoring
 
-Public `GET /health` exposes coarse health. Administrator-only `/status` and
-`/health/deep` expose diagnostics. The `operations` section reports recovery age,
-quarantine, due retries, Fio freshness, maintenance, backups and D1 allocation.
+BankSync runs without a monitoring service. Public `GET /health` exposes coarse
+health; administrator-only `/status` and `/health/deep` retain diagnostics.
 
-| Warning | Threshold |
-| --- | --- |
-| Open recovery | Older than 1 hour |
-| Quarantine | Any entry |
-| Fio freshness | Older than 30 minutes |
-| Maintenance | Older than 2 days |
-| Backup | Older than 9 days |
-| D1 allocation | Above 8 GB |
-| D1 growth | Above 50 MB/day |
+Optionally set `OPERATIONS_READ_TOKEN` to a random value of at least 32 characters.
+`GET /health/operations` accepts `Authorization: Bearer <token>` and returns
+`{ major: 1, observed_at: <Unix milliseconds>, metrics: { ... } }`. The token
+cannot access administrator or tenant routes. This endpoint only reads storage,
+returns `Cache-Control: no-store`, and exposes counts/ages/storage sizes without
+account IDs, bank information, callback URLs, secrets or exception messages.
+Unconfigured/wrong credentials return 401; other methods return 405; unavailable
+storage or a schema other than 13 returns 503.
 
-Missing maintenance, backup or first successful import markers are reported as
-unknown. Daily maintenance samples D1 allocation; growth needs two samples.
-Deleting rows frees reusable SQLite pages and may not shrink the database file.
-Delivery failures have separate per-job alerts; historical terminal jobs are
-not counted as new incidents.
+Metrics cover active subscriptions' terminal/pending deliveries and oldest age,
+recovery backlog/quarantine, email backlog/quarantine, enabled API accounts and
+freshness, parse failures/import counts/unmatched mail over 24 hours, maintenance,
+backup and physical D1 allocation/growth. Ages use seconds; storage uses bytes.
+Missing maintenance/backup/growth evidence is `null`, never a fabricated success.
+Growth needs two daily samples; deleting rows may not shrink physical allocation.
+
+Your monitor owns polling, thresholds, incident state and notification delivery.
+No monitoring SDK, webhook, service binding or notification database is required
+by BankSync. Version 0.3.0 removes `ALERT_WEBHOOK_URL`, `ALERT_WEBHOOK_SECRET` and
+`status.queues.pending_delivery_alerts`. Historical `alert_state` and
+`webhook_delivery_alerts` tables are retained only as backup-covered evidence:
+there are no live writers, readers or retry jobs. Applied migrations stay intact.
 
 ## Migrate an existing installation
 

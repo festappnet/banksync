@@ -60,16 +60,3 @@ export async function recordStorageSample(db:D1Database):Promise<void> {
     .bind(JSON.stringify({bytes:schema.meta.size_after,at:new Date().toISOString()})));
   await db.batch(writes);
 }
-
-export const OPERATIONS_THRESHOLDS={recovery_oldest_age_s:3600,email_quarantined:1,recovery_quarantined:1,
-  api_freshness_age_s:1800,api_never_succeeded:1,maintenance_missing:1,backup_missing:1,maintenance_age_s:172800,backup_age_s:9*86400,db_size_bytes:8_000_000_000,db_growth_bytes_per_day:50_000_000};
-export function operationalBreaches(status:OperationsStatus):Array<{metric:string;value:number;threshold:number}> {
-  const values:Record<string,number>={recovery_oldest_age_s:status.recovery_oldest_age_s,email_quarantined:status.email_quarantined,
-    recovery_quarantined:status.recovery_quarantined,api_freshness_age_s:Math.max(0,...status.api_accounts.map(account=>account.freshness_age_s??0)),
-    api_never_succeeded:status.api_accounts.filter(account=>account.last_success_at===null).length,
-    maintenance_missing:status.last_maintenance_at===null?1:0,backup_missing:status.last_backup_at===null?1:0,
-    maintenance_age_s:status.maintenance_age_s??0,backup_age_s:status.backup_age_s??0,
-    db_size_bytes:status.db_size_bytes,db_growth_bytes_per_day:status.db_growth_bytes_per_day??0};
-  return Object.entries(OPERATIONS_THRESHOLDS).filter(([metric,threshold])=>values[metric]!>=threshold)
-    .map(([metric,threshold])=>({metric,value:values[metric]!,threshold}));
-}

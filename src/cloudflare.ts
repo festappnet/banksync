@@ -82,8 +82,7 @@ import { checkIdempotency, recordIdempotency, sha256Hex } from './idempotency';
 import { recordAudit, shouldAuditMethod, redactBodyForAudit, listAuditLog } from './audit';
 import { checkAndIncrement, pruneOldBuckets } from './rate_limit';
 import { deepHealth, auditCfRoutingDrift } from './health_deep';
-import { runAlerterTick, DEFAULT_THRESHOLDS } from './alerter';
-import { detectStalledIncidents, drainDeliveryAlerts } from './alertOutbox';
+import { readOperationsProbe } from './operationsProbe';
 import { runBackupTick } from './backup';
 import { createWebhookDeliveryCoordinator, DeliveryQueries } from './webhookDeliveryCoordinator';
 import {
@@ -126,10 +125,8 @@ export interface Env extends VersionedSecretEnv {
   /** Subdomain hosting bank-* receivers (e.g. banksync.festapp.net). */
   BANKSYNC_DOMAIN?: string;
   // ---- Phase 1.6 additions ----
-  /** Slack/Discord incoming webhook for alerter. Undefined → alerter disabled. Set via wrangler secret put. */
-  ALERT_WEBHOOK_URL?: string;
-  /** Bearer credential for an internal alert-ingest endpoint. */
-  ALERT_WEBHOOK_SECRET?: string;
+  /** Optional credential restricted to GET /health/operations. */
+  OPERATIONS_READ_TOKEN?: string;
   /** R2 bucket binding for weekly SQL backup. Undefined → backup disabled. */
   BACKUPS?: R2Bucket;
   /** Trusted authserv-id observed and verified from Cloudflare Email Routing. */
@@ -712,6 +709,18 @@ async function runTestEmail(req: Request, env: Env): Promise<Response> {
 async function adminFetch(req: Request, env: Env): Promise<Response> {
   const url = new URL(req.url);
 
+  if (url.pathname === '/health/operations') {
+    const token = req.headers.get('Authorization')?.match(/^Bearer (\S+)$/)?.[1] ?? '';
+    const configured = env.OPERATIONS_READ_TOKEN;
+    if (!configured || configured.length < 32 || !token || !timingSafeEqual(token, configured)) return new Response('Unauthorized', { status: 401, headers: { 'WWW-Authenticate': 'Bearer', 'Cache-Control': 'no-store' } });
+    if (req.method !== 'GET') return new Response(null, { status: 405, headers: { Allow: 'GET', 'Cache-Control': 'no-store' } });
+    try {
+      return Response.json(await readOperationsProbe(env.DB), { headers: { 'Cache-Control': 'no-store' } });
+    } catch {
+      return Response.json({ error: 'operations_unavailable' }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+    }
+  }
+
   // Public health is deliberately the only anonymous information surface.
   if (url.pathname === '/health' && req.method === 'GET') return healthResponse(env);
 
@@ -732,7 +741,6 @@ async function adminFetch(req: Request, env: Env): Promise<Response> {
       queue: env.WEBHOOK_QUEUE ?? null,
       cf: cfRoutingConfig(env),
       secrets: {
-        alertWebhookPresent: Boolean(env.ALERT_WEBHOOK_URL && env.ALERT_WEBHOOK_SECRET),
         backupsPresent: Boolean(
           env.BACKUPS
           && Number.isInteger(Number(env.BACKUP_ENCRYPTION_KEY_VERSION))
@@ -994,10 +1002,10 @@ async function dispatch(
     const expanded=await env.DB.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
     if(input.ingest_enabled===false && !['11','12','13'].includes(expanded?.value??'')) return jsonResponse({error:'paused_ingest_requires_schema11'},409);
     const capability=['11','12','13'].includes(expanded?.value??'') ? await env.DB.prepare('SELECT event_version FROM webhook_consumers WHERE app_id=?').bind(input.owner_app_id).first<{event_version:string}>() : null;
-    if(capability?.event_version==='2' && (input.ingest_mode==='email'||input.ingest_mode==='both') && (env.AUTHENTICATED_EMAIL_SPOOL!=='on'||!env.BACKUPS)) return jsonResponse({error:'durable_email_capability_not_configured'},503);
-    if(capability?.event_version==='2' && input.ingest_mode==='both') return jsonResponse({error:'both_requires_verified_correlation'},409);
-    const pairingCode = await generateUniquePairingCode(env.DB);
     const ingestMode = input.ingest_mode ?? (input.fio_api_token ? 'api' : 'email');
+    if(capability?.event_version==='2' && (ingestMode==='email'||ingestMode==='both') && (env.AUTHENTICATED_EMAIL_SPOOL!=='on'||!env.BACKUPS)) return jsonResponse({error:'durable_email_capability_not_configured'},503);
+    if(capability?.event_version==='2' && ingestMode==='both') return jsonResponse({error:'both_requires_verified_correlation'},409);
+    const pairingCode = await generateUniquePairingCode(env.DB);
     const createEmailRoute = ingestMode === 'email' || ingestMode === 'both';
     const encryptedApiToken = input.fio_api_token
       ? await encryptSecret(input.fio_api_token, env)
@@ -1747,38 +1755,6 @@ export default {
         }
       } catch (err) {
         logError('api_sync_tick_failed', err, {});
-      }
-    }
-
-    // Alerter tick
-    if (runReconciliation && env.ALERT_WEBHOOK_URL) {
-      try {
-        const alert = await runAlerterTick(env.DB, {
-          webhookUrl: env.ALERT_WEBHOOK_URL,
-          webhookSecret: env.ALERT_WEBHOOK_SECRET,
-          service: env.BANKSYNC_DOMAIN ?? 'banksync',
-          thresholds: DEFAULT_THRESHOLDS,
-        });
-        if (alert.fired) log('alert_fired', { posted: alert.posted, severity: alert.payload.severity });
-      } catch (err) {
-        logError('alerter_tick_failed', err, {});
-      }
-    }
-
-    // Per-job delivery alert outbox: detect stalled incidents, then drain due
-    // alerts. Each incident is durable and per-job deduplicated — no global
-    // debounce can hide a new terminal payment incident.
-    if (runReconciliation && env.ALERT_WEBHOOK_URL) {
-      try {
-        const service = env.BANKSYNC_DOMAIN ?? 'banksync';
-        await detectStalledIncidents(env.DB, service);
-        await drainDeliveryAlerts(env.DB, {
-          webhookUrl: env.ALERT_WEBHOOK_URL,
-          webhookSecret: env.ALERT_WEBHOOK_SECRET,
-          service,
-        });
-      } catch (err) {
-        logError('delivery_alert_drain_failed', err, {});
       }
     }
 

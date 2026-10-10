@@ -49,3 +49,5 @@ ENCRYPTION_KEY_VERSION = "1"
 EMAIL_AUTHSERV_ID = "replace-after-verifying-real-cloudflare-header"
 CALLBACK_HOST_ALLOWLIST = "consumer.example.com"
 BACKUP_ENCRYPTION_KEY_VERSION = "1"
+
+# Optional read-only operations endpoint: wrangler secret put OPERATIONS_READ_TOKEN
