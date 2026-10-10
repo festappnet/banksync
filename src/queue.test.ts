@@ -210,13 +210,14 @@ describe('2xx happy path', () => {
   it('keeps the HTTP deadline active while a receipt body stalls after headers', async () => {
     const {env,sqlite}=await makeEnv('test-secret-stalled-receipt');
     vi.useFakeTimers({toFake:['setTimeout','clearTimeout']});
+    let fetched!:()=>void; const ready=new Promise<void>(resolve=>{fetched=resolve});
     try {
       vi.spyOn(globalThis,'fetch').mockImplementation(async (_url,init)=>new Response(new ReadableStream({
-        start(controller) { init!.signal!.addEventListener('abort',()=>controller.error(new Error('aborted')), {once:true}); },
+        start(controller) { init!.signal!.addEventListener('abort',()=>controller.error(new Error('aborted')), {once:true}); fetched(); },
       }),{status:200}));
       const msg=makeMsg({attempts:1});
       const work=handleQueueBatch(makeBatch([msg]),env);
-      for(let i=0;i<100&&!vi.getTimerCount();i++) await new Promise<void>(resolve=>setImmediate(resolve));
+      await ready;
       expect(vi.getTimerCount()).toBe(1);
       await vi.advanceTimersByTimeAsync(10000);
       await work;
