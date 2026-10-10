@@ -3,7 +3,8 @@ packages:
 
 overrides:
   'esbuild@>=0.27.3 <0.28.1': 0.28.1
-  'undici@>=7.0.0 <7.29.0': 7.29.0
+  'undici@>=7.0.0 <7.29.1': 7.29.1
+  'source-map-js@>=1.0.0 <1.2.2': 1.2.2
 
 allowBuilds:
   '@cloudflare/unenv-preset': false

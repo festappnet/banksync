@@ -42,6 +42,7 @@
     "deploy": "wrangler deploy",
     "test": "vitest run",
     "security:secrets": "node scripts/check-secrets.mjs",
+    "security:dependencies": "pnpm audit --audit-level low",
     "typecheck": "tsc --noEmit",
     "check": "pnpm typecheck && pnpm test && pnpm build && pnpm check:package-exports",
     "check:package-exports": "node scripts/check-package-exports.mjs",
@@ -58,9 +59,9 @@
     "better-sqlite3": "^13.0.3",
     "tsup": "^8.5.0",
     "typescript": "^5.9.3",
-    "vite": "^8.2.2",
+    "vite": "^8.3.4",
     "vitest": "^4.1.5",
-    "wrangler": "4.130.0"
+    "wrangler": "4.149.0"
   },
   "engines": {
     "node": ">=20"
