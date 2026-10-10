@@ -101,18 +101,20 @@ async function httpResult(response: Response, deliveryId: string, usedPrevSecret
     : { kind: 'http', httpStatus: response.status, usedPrevSecret, primaryStatus, receiptError: parsed.error };
 }
 
-async function postSigned(url: string, envelope: WebhookEnvelope, secret: string): Promise<Response> {
+async function postSigned(url: string, envelope: WebhookEnvelope, secret: string, usedPrevSecret: boolean, primaryStatus: number | null): Promise<SenderResult> {
   const signed = await signWebhook({ envelope, secret });
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    return await fetch(url, {
+    const response = await fetch(url, {
       method: 'POST',
       body: signed.bodyBytes.buffer as ArrayBuffer,
       headers: signed.headers,
       signal: controller.signal,
       redirect: 'manual',
     });
+    // Keep the deadline alive until the bounded receipt body has been consumed.
+    return await httpResult(response, envelope.delivery_id, usedPrevSecret, primaryStatus);
   } finally {
     clearTimeout(timeoutId);
   }
@@ -142,31 +144,31 @@ export function createWebhookSender(env: WebhookSenderEnv): WebhookSender {
         // through the Queue/DLQ cycle only delays and obscures the root cause.
         return { kind: 'configuration_error', error: 'consumer_secret_decrypt_failed' };
       }
-      let primary: Response;
+      let primary: SenderResult;
       try {
-        primary = await postSigned(callbackUrl, job.envelope, primarySecret);
+        primary = await postSigned(callbackUrl, job.envelope, primarySecret, false, null);
       } catch (err) {
         return { kind: 'network_error', error: String(err), usedPrevSecret: false };
       }
 
       // Grace-window secret fallback only on an auth rejection.
-      if ((primary.status === 401 || primary.status === 403) && consumer.prev_cipher_in_grace !== null) {
+      if (primary.kind === 'http' && (primary.httpStatus === 401 || primary.httpStatus === 403) && consumer.prev_cipher_in_grace !== null) {
         let prevSecret: string;
         try {
           prevSecret = await webhookDecrypt(consumer.prev_cipher_in_grace, env.WEBHOOK_KEK);
         } catch {
           return { kind: 'configuration_error', error: 'consumer_secret_decrypt_failed' };
         }
-        let prev: Response;
+        let prev: SenderResult;
         try {
-          prev = await postSigned(callbackUrl, job.envelope, prevSecret);
+          prev = await postSigned(callbackUrl, job.envelope, prevSecret, true, primary.httpStatus);
         } catch (err) {
           return { kind: 'network_error', error: String(err), usedPrevSecret: true };
         }
-        return httpResult(prev, job.delivery_id, true, primary.status);
+        return prev;
       }
 
-      return httpResult(primary, job.delivery_id, false, null);
+      return primary;
     },
   };
 }

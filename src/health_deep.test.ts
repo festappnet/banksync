@@ -131,20 +131,20 @@ describe('deepHealth', () => {
 
     const missingProd = await deepHealth({
       db, queue: fakeQueue(), cf: cfgEnabled,
-      secrets: { alertWebhookPresent: false, backupsPresent: true, emailAuthPresent: true, callbackPolicyPresent: true, isProduction: true },
+      secrets: { backupsPresent: false, emailAuthPresent: true, callbackPolicyPresent: true, isProduction: true },
     });
     expect(missingProd.components.required_secrets).toBe('red');
     expect(missingProd.status).toBe('red');
 
     const missingDev = await deepHealth({
       db, queue: fakeQueue(), cf: cfgEnabled,
-      secrets: { alertWebhookPresent: false, backupsPresent: false, emailAuthPresent: false, callbackPolicyPresent: false, isProduction: false },
+      secrets: { backupsPresent: false, emailAuthPresent: false, callbackPolicyPresent: false, isProduction: false },
     });
     expect(missingDev.components.required_secrets).toBe('yellow');
 
     const present = await deepHealth({
       db, queue: fakeQueue(), cf: cfgEnabled,
-      secrets: { alertWebhookPresent: true, backupsPresent: true, emailAuthPresent: true, callbackPolicyPresent: true, isProduction: true },
+      secrets: { backupsPresent: true, emailAuthPresent: true, callbackPolicyPresent: true, isProduction: true },
     });
     expect(present.components.required_secrets).toBe('green');
   });

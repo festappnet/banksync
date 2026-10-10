@@ -777,21 +777,20 @@ const SQL_COUNT_CONSUMERS = `SELECT COUNT(*) as cnt FROM webhook_consumers`;
 const SQL_LAST_TX_AT = `SELECT MAX(created_at) as ts FROM transactions`;
 const SQL_LAST_EMAIL_AT = `SELECT MAX(created_at) as ts FROM event_log WHERE event_type = 'tx_inserted'`;
 const SQL_PARSE_ERRORS_24H = `SELECT COUNT(*) as cnt FROM parse_log WHERE created_at > datetime('now','-1 day')`;
-const SQL_PARSE_FAILURES_24H = `SELECT COUNT(*) as cnt FROM parse_log
+export const SQL_PARSE_FAILURES_24H = `SELECT COUNT(*) as cnt FROM parse_log
   WHERE created_at > datetime('now','-1 day')
     AND error_message NOT LIKE 'not_transaction:%'
     AND error_message NOT IN ('email_identity_mismatch', 'email_ingest_disabled_untrusted_authserv')`;
 const SQL_NOT_TRANSACTION_24H = `SELECT COUNT(*) as cnt FROM parse_log WHERE error_message LIKE 'not_transaction:%' AND created_at > datetime('now','-1 day')`;
-const SQL_TX_INSERTED_24H = `SELECT COUNT(*) as cnt FROM event_log WHERE event_type = 'tx_inserted' AND created_at > datetime('now','-1 day')`;
+export const SQL_TX_INSERTED_24H = `SELECT COUNT(*) as cnt FROM event_log WHERE event_type = 'tx_inserted' AND created_at > datetime('now','-1 day')`;
 const SQL_UNKNOWN_CURRENCY_24H = `SELECT COUNT(*) as cnt FROM parse_log WHERE error_message LIKE 'unknown_currency:%' AND created_at > datetime('now','-1 day')`;
 const SQL_OUTGOING_FILTERED_24H = `SELECT COUNT(*) as cnt FROM parse_log WHERE error_message = 'outgoing_filtered' AND created_at > datetime('now','-1 day')`;
 const SQL_UNKNOWN_PROVIDER_24H = `SELECT COUNT(*) as cnt FROM parse_log WHERE error_message LIKE 'unknown_provider:%' AND created_at > datetime('now','-1 day')`;
-const SQL_UNMATCHED_24H = `SELECT COUNT(*) as cnt FROM parse_log WHERE (error_message LIKE 'no_pairing_code:%' OR error_message LIKE 'unknown_pairing_code:%') AND created_at > datetime('now','-1 day')`;
+export const SQL_UNMATCHED_24H = `SELECT COUNT(*) as cnt FROM parse_log WHERE (error_message LIKE 'no_pairing_code:%' OR error_message LIKE 'unknown_pairing_code:%') AND created_at > datetime('now','-1 day')`;
 const SQL_DELIVERY_ACTIVE = `SELECT COUNT(*) as cnt FROM webhook_delivery_jobs WHERE status IN ('pending', 'dispatching', 'queued')`;
 const SQL_DELIVERY_STALLED = `SELECT COUNT(*) as cnt FROM webhook_delivery_jobs WHERE status IN ('pending', 'dispatching', 'queued') AND julianday(created_at) <= julianday('now', '-10 minutes')`;
 const SQL_DELIVERY_TERMINAL = `SELECT COUNT(*) as cnt FROM webhook_delivery_jobs WHERE status = 'terminal'`;
 const SQL_DELIVERY_OLDEST_PENDING = `SELECT MIN(created_at) as ts FROM webhook_delivery_jobs WHERE status IN ('pending', 'dispatching', 'queued')`;
-const SQL_PENDING_DELIVERY_ALERTS = `SELECT COUNT(*) as cnt FROM webhook_delivery_alerts WHERE posted_at IS NULL`;
 const SQL_PER_ACCOUNT_TX_7D = `SELECT bank_account_id, COUNT(*) as cnt FROM transactions WHERE created_at > datetime('now','-7 days') GROUP BY bank_account_id`;
 const SQL_PER_ACCOUNT_PARSE_ERRORS_24H = `SELECT bank_account_id, COUNT(*) as cnt FROM parse_log WHERE bank_account_id IS NOT NULL AND created_at > datetime('now','-1 day') GROUP BY bank_account_id`;
 const SQL_PER_ACCOUNT_LAST_EMAIL = `SELECT bank_account_id, MAX(created_at) as ts FROM event_log WHERE event_type = 'tx_inserted' GROUP BY bank_account_id`;
@@ -866,14 +865,13 @@ export interface StatusData {
     delivery_terminal: number;
     oldest_undelivered_at: string | null;
     /** Unposted rows in the per-job alert outbox. */
-    pending_delivery_alerts: number;
     api_rate_limited_24h: number;
   };
 }
 
 export async function getStatusData(db: D1Database): Promise<StatusData> {
   const [
-    failures, txInserted24h, unknownCurr, outgoing, unknownProv, unmatched, deliveryActive, deliveryStalled, deliveryTerminal, oldestUndelivered, pendingAlerts, notTransaction,
+    failures, txInserted24h, unknownCurr, outgoing, unknownProv, unmatched, deliveryActive, deliveryStalled, deliveryTerminal, oldestUndelivered, notTransaction,
     apiRateLimited, accountRows, txPer7d, parseErrPerAcct, lastEmailPerAcct,
     consumerRows, webhookLast, webhooks24h, webhookErrors24h, deliveredPerConsumer,
   ] = await Promise.all([
@@ -887,7 +885,6 @@ export async function getStatusData(db: D1Database): Promise<StatusData> {
     db.prepare(SQL_DELIVERY_STALLED).first<{ cnt: number }>(),
     db.prepare(SQL_DELIVERY_TERMINAL).first<{ cnt: number }>(),
     db.prepare(SQL_DELIVERY_OLDEST_PENDING).first<{ ts: string | null }>(),
-    db.prepare(SQL_PENDING_DELIVERY_ALERTS).first<{ cnt: number }>(),
     db.prepare(SQL_NOT_TRANSACTION_24H).first<{ cnt: number }>(),
     db.prepare(SQL_API_RATE_LIMITED_24H).first<{ cnt: number }>(),
     db.prepare(SQL_LIST_BANK_ACCOUNTS).all<{ id: number; account_type: string; label: string | null; api_last_success_at: string | null; created_at: string }>(),
@@ -947,7 +944,6 @@ export async function getStatusData(db: D1Database): Promise<StatusData> {
       delivery_stalled: deliveryStalled?.cnt ?? 0,
       delivery_terminal: deliveryTerminal?.cnt ?? 0,
       oldest_undelivered_at: oldestUndelivered?.ts ?? null,
-      pending_delivery_alerts: pendingAlerts?.cnt ?? 0,
       api_rate_limited_24h: apiRateLimited?.cnt ?? 0,
     },
   };

@@ -602,6 +602,17 @@ describe('schema mismatch returns 503 from /health', () => {
 describe('admin POST /bank-accounts', () => {
   beforeEach(() => resetSchemaCheckCache());
 
+  it('requires durable email capability for a v2 account with default ingest mode', async () => {
+    const {db,sqlite}=operationsDb(); const env=makeEnv(db);
+    sqlite.exec(`INSERT INTO webhook_consumers(app_id,callback_url,secret_cipher,secret_hash,secret_prefix,event_version)
+      VALUES('fixture-v2','https://consumer.example.com','cipher','hash','prefix','2')`);
+    const response=await adminReq('POST','/bank-accounts',env,{account_number:'123456/2010',owner_app_id:'fixture-v2'});
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({error:'durable_email_capability_not_configured'});
+    expect(sqlite.prepare('SELECT count(*) n FROM bank_accounts').get()).toEqual({n:0});
+  });
+
+
   it('creates account and GET /bank-accounts shows it', async () => {
     const { db, sqlite } = makeTestDb();
     const env = makeEnv(db);
@@ -1262,7 +1273,6 @@ describe('/status structure', () => {
     const queues = body.queues as Record<string, unknown>;
     expect('main_pending' in queues).toBe(true);
     expect('delivery_active' in queues).toBe(true);
-    expect('pending_delivery_alerts' in queues).toBe(true);
     expect('dlq_pending' in queues).toBe(false); // removed dead alias
     const service = body.service as Record<string, unknown>;
     expect(typeof service.parse_failures_24h).toBe('number');

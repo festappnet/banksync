@@ -1,14 +1,12 @@
 import {describe,it,expect} from 'vitest';
 import {operationsDb} from './operationsTestSupport';
-import {getOperationsStatus,recordStorageSample,operationalBreaches} from './operationsStatus';
+import {getOperationsStatus,recordStorageSample} from './operationsStatus';
 import {getStatusData} from './db';
-import {evaluateThresholds,DEFAULT_THRESHOLDS} from './alerter';
 describe('protected operations status',()=>{
   it('keeps older schemas compatible and reports empty observations without invented freshness',async()=>{
     expect(await getOperationsStatus(operationsDb(12).db)).toBeUndefined();
     const {db}=operationsDb();const status=(await getOperationsStatus(db))!;
     expect(status.recovery_open).toBe(0);expect(status.api_accounts).toEqual([]);expect(status.last_backup_at).toBeNull();expect(status.db_size_bytes).toBeGreaterThan(0);
-    expect(operationalBreaches(status).map(metric=>metric.metric)).toEqual(['maintenance_missing','backup_missing']);
   });
   it('separates pending retries, quarantines, current API freshness and successful maintenance',async()=>{
     const {db,sqlite}=operationsDb();sqlite.exec(`INSERT INTO bank_accounts(id,account_number,pairing_code,api_fetch_enabled,ingest_mode,api_last_success_at) VALUES(1,'1234/2010','fixture',1,'api',datetime('now','-2 hours'));
@@ -19,8 +17,6 @@ describe('protected operations status',()=>{
     expect(status.recovery_open).toBe(1);expect(status.recovery_quarantined).toBe(1);expect(status.recovery_oldest_age_s).toBeGreaterThanOrEqual(7200);
     expect(status.email_pending).toBe(2);expect(status.email_due).toBe(1);expect(status.email_quarantined).toBe(1);
     expect(status.api_accounts[0]?.freshness_age_s).toBeGreaterThanOrEqual(7200);
-    const alert=await evaluateThresholds(db,{webhookUrl:'https://example.test',service:'fixture',thresholds:DEFAULT_THRESHOLDS});
-    expect(alert?.triggered_thresholds.map(row=>row.metric)).toEqual(['recovery_oldest_age_s','email_quarantined','recovery_quarantined','api_freshness_age_s']);
   });
   it('measures physical allocation and daily growth from successful samples',async()=>{
     const {db,sqlite}=operationsDb();

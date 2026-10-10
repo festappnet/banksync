@@ -35,7 +35,6 @@ export interface DeepHealthArgs {
   cf: CfRoutingConfig;
   /** Presence of required operational bindings. Never their values. */
   secrets?: {
-    alertWebhookPresent: boolean;
     backupsPresent: boolean;
     emailAuthPresent: boolean;
     callbackPolicyPresent: boolean;
@@ -45,7 +44,7 @@ export interface DeepHealthArgs {
 
 function probeRequiredSecrets(secrets: DeepHealthArgs['secrets']): HealthStatus {
   if (!secrets) return 'green'; // not evaluated (e.g. unit tests)
-  const allPresent = secrets.alertWebhookPresent && secrets.backupsPresent
+  const allPresent = secrets.backupsPresent
     && secrets.emailAuthPresent && secrets.callbackPolicyPresent;
   if (allPresent) return 'green';
   // Missing a required binding is a release blocker in production, a warning elsewhere.
