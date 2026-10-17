@@ -1,6 +1,6 @@
 import type {D1Database} from '@cloudflare/workers-types';
 import {sha256Hex} from './idempotency';
-import {canonicalIban} from './paymentReferences';
+import {canonicalIban} from './bankAccountIdentity';
 
 export function normalizedBankAccount(value:string):string {
   const clean=value.replace(/\s/g,'').toUpperCase();

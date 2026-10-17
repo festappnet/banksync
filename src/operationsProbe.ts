@@ -1,10 +1,11 @@
+import {schemaCapabilities} from './schemaCapabilities';
 import type { D1Database } from '@cloudflare/workers-types';
 import { SQL_PARSE_FAILURES_24H, SQL_TX_INSERTED_24H, SQL_UNMATCHED_24H } from './db';
 
 /** Facts only. Thresholds and incident delivery belong to the external monitor. */
 export async function readOperationsProbe(db: D1Database) {
   const schema = await db.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{ value: string }>();
-  if (schema?.value !== '13') throw new Error('operations_schema_unavailable');
+  if (!schemaCapabilities(schema?.value).recovery) throw new Error('operations_schema_unavailable');
   const [recovery, email, api, delivery, metadata, allocation, failures, inserted, unmatched] = await Promise.all([
     db.prepare(`SELECT count(CASE WHEN recovery_stage<>'quarantined' THEN 1 END) recovery_open,
       coalesce(max(CASE WHEN recovery_stage<>'quarantined' THEN max(0,unixepoch('now')-unixepoch(created_at)) END),0) recovery_oldest_age_s,

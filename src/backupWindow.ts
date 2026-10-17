@@ -1,3 +1,4 @@
+import {schemaCapabilities} from './schemaCapabilities';
 import type {D1Database} from '@cloudflare/workers-types';
 import {recoveryMaintenanceEnabled} from './recoveryMaintenance';
 
@@ -25,8 +26,8 @@ export async function acquireBackupWindow(db:D1Database):Promise<{owner:string;e
 export async function drainRecoveryWriters(db:D1Database):Promise<void> {
   const version=await db.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
   for(let attempt=0;attempt<=130;attempt++) {
-    const bank=Number(version?.value??0)>=11?await db.prepare("SELECT COUNT(*) AS n FROM bank_poll_leases WHERE datetime(lease_until)>datetime('now')").first<{n:number}>():{n:0};
-    const email=Number(version?.value??0)>=13?await db.prepare("SELECT COUNT(*) AS n FROM authenticated_email_spool WHERE state='pending' AND datetime(claim_until)>datetime('now')").first<{n:number}>():{n:0};
+    const bank=schemaCapabilities(version?.value).bankFacts?await db.prepare("SELECT COUNT(*) AS n FROM bank_poll_leases WHERE datetime(lease_until)>datetime('now')").first<{n:number}>():{n:0};
+    const email=schemaCapabilities(version?.value).recovery?await db.prepare("SELECT COUNT(*) AS n FROM authenticated_email_spool WHERE state='pending' AND datetime(claim_until)>datetime('now')").first<{n:number}>():{n:0};
     if(!bank?.n&&!email?.n)return;
     if(attempt===130)throw new Error('backup_recovery_writers_did_not_drain');
     await new Promise(resolve=>setTimeout(resolve,1000));

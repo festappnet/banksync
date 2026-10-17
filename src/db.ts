@@ -1,3 +1,4 @@
+import {schemaCapabilities, SUPPORTED_SCHEMA_VERSIONS} from './schemaCapabilities';
 import {RECOVERY_WRITES_ALLOWED} from './recoveryMaintenance';
 import {getOperationsStatus,recordStorageSample,type OperationsStatus} from './operationsStatus';
 import type { D1Database } from '@cloudflare/workers-types';
@@ -9,8 +10,7 @@ import { resolveVariableSymbol } from './referenceCandidates';
 
 // Accept the deployed schema during the additive recovery rollout. New writers
 // explicitly require schema 13; legacy schema support retains its old contract.
-const SUPPORTED_SCHEMA_VERSIONS = ['10', '11', '12', '13'] as const;
-type SupportedSchemaVersion = (typeof SUPPORTED_SCHEMA_VERSIONS)[number];
+
 
 const _checkedDbs = new Set<D1Database>();
 
@@ -21,7 +21,7 @@ export function resetSchemaCheckCache(): void {
 export async function assertSchemaVersion(db: D1Database): Promise<void> {
   if (_checkedDbs.has(db)) return;
   const row = await db.prepare(`SELECT value FROM schema_meta WHERE key = 'version'`).first<{ value: string }>();
-  if (!row || !SUPPORTED_SCHEMA_VERSIONS.includes(row.value as SupportedSchemaVersion)) {
+  if (!row || !SUPPORTED_SCHEMA_VERSIONS.includes(row.value)) {
     throw new Error(`schema_version_mismatch: got ${row?.value ?? 'null'}, expected one of ${SUPPORTED_SCHEMA_VERSIONS.join(', ')}`);
   }
   _checkedDbs.add(db);
@@ -213,7 +213,7 @@ export async function setBankAccountApiToken(db: D1Database, id: number, args: {
   ingest_mode?: 'email' | 'api' | 'both';
 }): Promise<BankAccount | null> {
   const schema=await db.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
-  if(schema?.value==='13') {
+  if(schemaCapabilities(schema?.value).recovery) {
     if(!args.token_hash) throw new Error('api_token_hash_required');
     const row=await db.prepare(`UPDATE bank_accounts SET api_token_cipher=?,api_token_key_ver=?,api_token_prefix=?,
       api_fetch_enabled=?,ingest_mode=COALESCE(?,ingest_mode),api_last_error=NULL,
@@ -265,7 +265,7 @@ RETURNING ${BANK_ACCOUNT_PUBLIC_COLS}
 
 export async function clearBankAccountApiToken(db: D1Database, id: number): Promise<BankAccount | null> {
   const schema=await db.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
-  const sql=schema?.value==='13' ? SQL_CLEAR_BANK_ACCOUNT_API_TOKEN.replace('api_last_error = NULL',
+  const sql=schemaCapabilities(schema?.value).recovery ? SQL_CLEAR_BANK_ACCOUNT_API_TOKEN.replace('api_last_error = NULL',
     'api_last_error = NULL, api_token_hash = NULL, api_credential_generation = api_credential_generation+1, api_backfill_done = 0, api_reconciled_through = NULL') : SQL_CLEAR_BANK_ACCOUNT_API_TOKEN;
   const row = await db.prepare(sql).bind(id).first<BankAccountRow>();
   return row ? mapBankAccount(row) : null;
@@ -521,7 +521,7 @@ export async function insertTransaction(db: D1Database, args: {
   writeFence?: {sql:string;values:(string|number)[]};
 }): Promise<InsertResult> {
   const schema = await db.prepare(`SELECT value FROM schema_meta WHERE key='version'`).first<{value: string}>();
-  const v2 = ['11','12','13'].includes(schema?.value??'');
+  const v2 = schemaCapabilities(schema?.value).bankFacts;
   const p = {
     ...args.payload,
     vs: v2 ? (args.payload.raw_vs ?? args.payload.vs ?? null) : resolveVariableSymbol(args.payload),
@@ -1008,7 +1008,7 @@ export async function pruneCompletedRecovery(db: D1Database): Promise<{
 }> {
   const schema = await db.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
   const counts = {recovery_payloads_cleared:0,recovery_batches_deleted:0,email_payloads_cleared:0,email_spool_deleted:0};
-  if (schema?.value !== '13') return counts;
+  if (!schemaCapabilities(schema?.value).recovery) return counts;
   const results = await db.batch([
     db.prepare(`UPDATE bank_recovery_batches SET cipher=NULL,key_version=NULL
       WHERE id IN (SELECT id FROM bank_recovery_batches WHERE state='completed' AND cipher IS NOT NULL ORDER BY completed_at,id LIMIT 500)`),

@@ -152,7 +152,7 @@ BACKUP_DECRYPTION_KEY='<base64 key>' \
 ```
 
 Restore into a separate database with the matching schema migrations. Restores
-start with recovery paused and payment-reference allocation locked. Verify the
+start with recovery paused and any historical payment-reference audit registries locked. Verify the
 restore before rotating keys or resuming processing.
 
 ## Account export and reconciliation
@@ -184,3 +184,10 @@ verified Dependabot metadata without executing PR code.
 Protected `v*` tags trigger npm OIDC publishing. GitHub releases attach the same
 tarball, checksum, provenance and SBOM. Publishing the SDK does not deploy a
 Worker or change production data.
+
+### Reference-issuance retirement
+
+BankSync no longer allocates application VS. Follow [retirement and retained
+history](payment-references.md) when upgrading from the former optional API.
+Deploy the schema-13/14 compatible issuance-free runtime before migration 0014;
+existing bank/import/delivery contracts remain independent of this old registry.

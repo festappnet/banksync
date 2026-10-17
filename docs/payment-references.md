@@ -1,41 +1,30 @@
-# Optional payment references
+# Payment-reference issuance retired
 
-Reserve variable symbols when several applications share a bank account.
-This optional feature requires schema 12 or 13 and does not change bank imports.
+BankSync imports and delivers bank facts. Consumers own VS allocation, invoices,
+order matching and uniqueness rules. BankSync never requires a bank transaction
+reference to be registered, unique, allocated or associated with an order.
 
-## Enroll an account
+The former `/bank-accounts/:id/payment-references` and
+`/bank-accounts/:id/payment-reference-admin` endpoints now return HTTP 410
+`endpoint_retired`, including requests carrying previously cached idempotency keys.
+They no longer allocate, reserve, import, grant or activate payment references.
+The payment-reference-specific package exports `normalizeVs` and `PaymentReference`
+are removed. This is a breaking capability withdrawal for any external consumer;
+deploy only after verifying its usage inventory. No connected consumer was found
+in the local Festapp/Mendelio source inventory on 2026-10-18.
 
-An administrator calls `POST /bank-accounts/:id/payment-reference-admin` to:
+`canonicalIban` remains a bank-account identity utility; `/account-health` remains
+an authorized read-only bank-observation endpoint. Polling leases still normalize
+account identity. Neither depends on the obsolete registry.
 
-1. Map aliases to a canonical CZ IBAN and `grant` access to a consumer.
-2. `import` known historical symbols using `vs`.
-3. `activate` allocation with `registry_verified:true`.
+Migration 0012 remains immutable history. Migration 0014 locks historical
+registries and removes their bank-account edit trigger. It does not delete
+reservations, conflicts, aliases or grants. Backups retain these old audit tables
+and restore their allocation flag locked; no runtime allocation writer remains.
+Historical tables may be removed only under a separate authorized retention and
+consumer-reconciliation operation. VS/RF fields, legacy v1 projection utilities,
+v2 raw facts, webhook signatures and deliveries retain their existing contracts.
 
-The registry starts locked and restores locked. An import collision is recorded
-and locks allocation until an operator resolves the inventory.
-
-## Reserve a symbol
-
-Call `POST /bank-accounts/:id/payment-references` with `source_ref` and
-`payload_hash`. BankSync reserves a random, unique ten-digit symbol. To request a
-specific symbol, also send `variable_symbol` (1-10 digits).
-
-| Request | Result |
-| --- | --- |
-| Same immutable command | Same reservation |
-| Changed command for an existing reference | HTTP 409 `reference_conflict` |
-| Requested symbol already in use | HTTP 409; existing reservation stays intact |
-| `GET` with `source_ref` | Only the caller's reservation |
-
-Leading zeros share a namespace. Symbols never expire or get reused. Deleting
-and recreating an account does not erase its physical identity. Runtime conflicts
-do not overwrite history or lock unrelated reservations.
-
-## Limits
-
-Uniqueness covers enrolled/imported symbols, not symbols generated independently
-elsewhere. Existing allocators are not migrated automatically. Account health is
-available to an owner or active subscriber without reference enrollment; it
-reports observed successful imports, not proof of complete bank history.
-
-Return to the [integration guide](guide.md).
+Deploy a schema-13/14 compatible runtime before applying 0014. Rollback must use
+this issuance-free compatible runtime; never reactivate the retired allocator.
+No production operation is authorized by this source change.

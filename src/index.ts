@@ -45,4 +45,4 @@ export type {
   WebhookSubscription,
 } from "./types.js";
 
-export {normalizeVs,canonicalIban,type PaymentReference} from './paymentReferences.js';
+export {canonicalIban} from './bankAccountIdentity.js';

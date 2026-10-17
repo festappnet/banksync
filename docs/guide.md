@@ -130,5 +130,4 @@ BankSync 0.2.9 supports schemas 10-13.
 
 - [Account export and controlled reconciliation](operations.md#account-export-and-reconciliation)
 - [Fio recovery, retention and monitoring](operations.md#recovery-and-monitoring)
-- [Optional payment-reference allocation](payment-references.md)
 - [Security, backups and migrations](operations.md#security-and-backups)

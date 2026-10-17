@@ -5,7 +5,7 @@ import type {D1Database,D1PreparedStatement,D1Result} from '@cloudflare/workers-
 
 export function operationsDb(version = 13) {
   const sqlite = new Database(':memory:');
-  const files = ['0001_schema.sql','0010_security_hardening.sql','0011_complete_bank_facts.sql','0012_payment_references.sql','0013_recovery_operations.sql'];
+  const files = ['0001_schema.sql','0010_security_hardening.sql','0011_complete_bank_facts.sql','0012_payment_references.sql','0013_recovery_operations.sql','0014_retire_payment_reference_allocator.sql'];
   for (const file of files) {
     if (Number(file.slice(0,4)) > version) break;
     sqlite.exec(readFileSync(resolve(__dirname,'../migrations',file),'utf8'));
