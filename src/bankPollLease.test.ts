@@ -3,13 +3,13 @@ import {operationsDb} from './operationsTestSupport';
 import {withBankPollLease,normalizedBankAccount} from './bankPollLease';
 import {setBankAccountApiToken,clearBankAccountApiToken} from './db';
 
-describe('bank poll leases and credential epochs',()=>{
+describe.each([13,14])('bank poll leases and credential epochs on schema %i',(version)=>{
   it('normalizes CZ aliases and preserves non-CZ IBAN representations',()=>{
     expect(normalizedBankAccount('1234/2010')).toBe(normalizedBankAccount(normalizedBankAccount('1234/2010')));
     expect(normalizedBankAccount(' sk12 3456 ')).toBe('SK123456');
   });
   it('blocks competing same-token and physical-account requests and fences a stale writer',async()=>{
-    const {db,sqlite}=operationsDb();
+    const {db,sqlite}=operationsDb(version);
     sqlite.exec("INSERT INTO bank_accounts(id,account_number,pairing_code) VALUES(1,'1234/2010','fixture')");
     await withBankPollLease(db,'1234/2010','synthetic',async lease=>{
       await expect(withBankPollLease(db,normalizedBankAccount('1234/2010'),'other',async()=>{})).rejects.toThrow('bank_poll_busy');
@@ -23,7 +23,7 @@ describe('bank poll leases and credential epochs',()=>{
     expect(sqlite.prepare('SELECT DISTINCT token FROM bank_poll_leases').all()).toEqual([{token:'replacement'}]);
   });
   it('updates token and digest atomically, resets bootstrap only for a changed token, and fences clear',async()=>{
-    const {db,sqlite}=operationsDb();
+    const {db,sqlite}=operationsDb(version);
     sqlite.exec("INSERT INTO bank_accounts(id,account_number,pairing_code,api_token_hash,api_backfill_done,api_reconciled_through) VALUES(1,'1234/2010','fixture','same',1,'2026-10-01')");
     const args={token_cipher:'encrypted',token_key_ver:1,token_prefix:'fixture',token_hash:'same',fetch_enabled:true};
     await setBankAccountApiToken(db,1,args);

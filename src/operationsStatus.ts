@@ -1,3 +1,4 @@
+import {schemaCapabilities} from './schemaCapabilities';
 import type {D1Database} from '@cloudflare/workers-types';
 export interface OperationsStatus {
   recovery_maintenance:boolean;
@@ -16,7 +17,7 @@ function age(value:string|null,now:number):number|null {
 }
 export async function getOperationsStatus(db:D1Database):Promise<OperationsStatus|undefined> {
   const schema=await db.prepare("SELECT value FROM schema_meta WHERE key='version'").all<{value:string}>();
-  if(schema.results[0]?.value!=='13') return undefined;
+  if(!schemaCapabilities(schema.results[0]?.value).recovery) return undefined;
   const [recovery,email,metadata,accounts]=await Promise.all([
     db.prepare(`SELECT SUM(CASE WHEN recovery_stage<>'quarantined' THEN 1 ELSE 0 END) AS open,
       MIN(CASE WHEN recovery_stage<>'quarantined' THEN created_at END) AS oldest,
@@ -52,7 +53,7 @@ export async function getOperationsStatus(db:D1Database):Promise<OperationsStatu
  * payload lengths or infer reclaimed bytes immediately after SQLite DELETE. */
 export async function recordStorageSample(db:D1Database):Promise<void> {
   const schema=await db.prepare("SELECT value FROM schema_meta WHERE key='version'").all<{value:string}>();
-  if(schema.results[0]?.value!=='13') return;
+  if(!schemaCapabilities(schema.results[0]?.value).recovery) return;
   const prior=await db.prepare("SELECT value FROM schema_meta WHERE key='db_size_sample'").first<{value:string}>();
   const writes=[];
   if(prior) writes.push(db.prepare("INSERT INTO schema_meta(key,value) VALUES('db_size_previous_sample',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(prior.value));

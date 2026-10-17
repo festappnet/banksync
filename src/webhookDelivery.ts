@@ -1,3 +1,4 @@
+import {schemaCapabilities} from './schemaCapabilities';
 import type { D1Database, Queue } from '@cloudflare/workers-types';
 import { ulid } from 'ulid';
 import { buildWebhookEnvelope } from './relay';
@@ -86,7 +87,7 @@ function newDispatchToken(): string {
  */
 export async function ensureDeliveryJobs(db: D1Database, transactionId?: number, cutover?: {accountId:number; consumerAppId:string; fromId:number; throughId:number}): Promise<number> {
   const schema = await db.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
-  const expanded = ['11','12','13'].includes(schema?.value??'');
+  const expanded = schemaCapabilities(schema?.value).bankFacts;
   if(cutover && !expanded) throw new Error('cutover_requires_schema11');
   const candidates = await db.prepare(`
     SELECT t.*, b.pairing_code, s.consumer_app_id${expanded ? ', c.event_version' : ''}
