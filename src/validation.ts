@@ -1,3 +1,4 @@
+import { BANK_ACCOUNT_TYPES } from './bankCapabilities.js';
 import * as v from 'valibot';
 
 /**
@@ -40,7 +41,7 @@ export function parseBody<TSchema extends v.GenericSchema>(
 export const CreateBankAccountSchema = v.object({
   ingest_enabled: v.optional(v.boolean()),
   account_number: v.pipe(v.string(), v.minLength(3), v.maxLength(64)),
-  account_type: v.optional(v.picklist(['FIO', 'AIRBANK'])),
+  account_type: v.optional(v.picklist(BANK_ACCOUNT_TYPES)),
   ingest_mode: v.optional(v.picklist(['email', 'api', 'both'])),
   fio_api_token: v.optional(v.pipe(v.string(), v.minLength(8), v.maxLength(512))),
   label: v.optional(v.pipe(v.string(), v.maxLength(120))),
@@ -54,7 +55,7 @@ export type CreateBankAccountInput = v.InferOutput<typeof CreateBankAccountSchem
 export const UpdateBankAccountSchema = v.pipe(
   v.object({
     account_number: v.optional(v.pipe(v.string(), v.minLength(3), v.maxLength(64))),
-    account_type: v.optional(v.picklist(['FIO', 'AIRBANK'])),
+    account_type: v.optional(v.picklist(BANK_ACCOUNT_TYPES)),
     ingest_mode: v.optional(v.picklist(['email', 'api', 'both'])),
     label: v.optional(v.union([v.pipe(v.string(), v.maxLength(120)), v.null_()])),
   }),

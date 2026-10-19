@@ -133,3 +133,13 @@ describe('extractEmailBody', () => {
     expect(result.text).not.toContain('<strong>');
   });
 });
+
+it('extracts visible notification fields without script, style or attribute contents', async () => {
+  const raw = makeRaw({
+    contentType: 'text/html; charset=utf-8',
+    body: '<style>Částka: 900,00 CZK</style><script>Částka: 800,00 CZK</script><div title="unrelated > text">Částka: <b>1&nbsp;234,56 CZK</b></div>',
+  });
+  const result = await extractEmailBody(toStream(raw));
+  expect(result.text).toContain('Částka: 1\u00a0234,56 CZK');
+  expect(result.text).not.toMatch(/900|800|unrelated/);
+});

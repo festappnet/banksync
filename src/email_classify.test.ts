@@ -111,7 +111,7 @@ describe('classifyEmail — transaction stage (received)', () => {
   it('rejects unknown_provider once past the gate', () => {
     const out = classify(
       mkEmail({ text: 'Generic bank notice, nothing to see' }),
-      mkAccount({ account_number: '1234567/0800' }),
+      mkAccount({ account_number: '1234567/0100' }),
       ALLOW,
     );
     expect(out).toMatchObject({ kind: 'reject', bankAccountId: 7, received: true });

@@ -984,6 +984,7 @@ async function dispatch(
     if(input.ingest_enabled===false && !schemaCapabilities(expanded?.value).bankFacts) return jsonResponse({error:'paused_ingest_requires_schema11'},409);
     const capability=schemaCapabilities(expanded?.value).bankFacts ? await env.DB.prepare('SELECT event_version FROM webhook_consumers WHERE app_id=?').bind(input.owner_app_id).first<{event_version:string}>() : null;
     const ingestMode = input.ingest_mode ?? (input.fio_api_token ? 'api' : 'email');
+    if ((input.account_type ?? 'FIO') !== 'FIO' && ingestMode !== 'email') return jsonResponse({error:'unsupported_bank_capability'},400);
     if(capability?.event_version==='2' && (ingestMode==='email'||ingestMode==='both') && (env.AUTHENTICATED_EMAIL_SPOOL!=='on'||!env.BACKUPS)) return jsonResponse({error:'durable_email_capability_not_configured'},503);
     if(capability?.event_version==='2' && ingestMode==='both') return jsonResponse({error:'both_requires_verified_correlation'},409);
     const pairingCode = await generateUniquePairingCode(env.DB);
@@ -1064,6 +1065,7 @@ async function dispatch(
     if (input instanceof Response) return input;
     if (input.account_number !== undefined && input.account_number !== existing.account_number
       && await env.DB.prepare('SELECT 1 FROM transactions WHERE bank_account_id=? LIMIT 1').bind(id).first()) return jsonResponse({error:'account_identity_immutable'},409);
+    if ((input.account_type ?? existing.account_type) !== 'FIO' && (input.ingest_mode ?? existing.ingest_mode) !== 'email') return jsonResponse({error:'unsupported_bank_capability'},400);
     const updated = await updateBankAccount(env.DB, id, input);
     if (!updated) return jsonResponse({ error: 'not_found' }, 404);
     return jsonResponse(updated);
