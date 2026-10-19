@@ -1,3 +1,4 @@
+import { Parser } from 'htmlparser2';
 import PostalMime from 'postal-mime';
 
 export interface ExtractedEmail {
@@ -40,20 +41,23 @@ export async function extractEmailBody(
   };
 }
 
-// Keep bank label/value boundaries in HTML-only notifications. Decode entities
-// after stripping markup so escaped text never becomes executable markup.
+// Parse markup as data, preserving label/value boundaries and decoding entities.
+// Script/style contents cannot supply transaction fields.
 function htmlToText(html: string): string {
-  return html
-    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '')
-    .replace(/<br\b[^>]*>|<\/(?:p|div|tr|td|th|li|h[1-6])\s*>/gi, '\n')
-    .replace(/<[^>]*>/g, '')
-    .replace(/&(?:nbsp|amp|lt|gt|quot|apos);|&#(?:x[0-9a-f]+|[0-9]+);/gi, entity => {
-      const named: Record<string, string> = { '&nbsp;': ' ', '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&apos;': "'" };
-      const key = entity.toLowerCase();
-      if (named[key]) return named[key]!;
-      const numeric = key.slice(2, -1);
-      const point = numeric.startsWith('x') ? parseInt(numeric.slice(1), 16) : parseInt(numeric, 10);
-      return point > 0 && point <= 0x10ffff && !(point >= 0xd800 && point <= 0xdfff) ? String.fromCodePoint(point) : '\ufffd';
-    })
-    .replace(/[ \t]+/g, ' ').replace(/ *\n */g, '\n').trim();
+  const text: string[] = [];
+  const boundaries = new Set(['br', 'p', 'div', 'tr', 'td', 'th', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']);
+  let hidden = 0;
+  const parser = new Parser({
+    onopentag(name) {
+      if (name === 'script' || name === 'style') hidden++;
+      if (!hidden && boundaries.has(name)) text.push('\n');
+    },
+    ontext(value) { if (!hidden) text.push(value); },
+    onclosetag(name) {
+      if (name === 'script' || name === 'style') hidden = Math.max(0, hidden - 1);
+      if (!hidden && boundaries.has(name)) text.push('\n');
+    },
+  }, { decodeEntities: true });
+  parser.end(html);
+  return text.join('').trim();
 }

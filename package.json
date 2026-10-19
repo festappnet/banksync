@@ -50,6 +50,7 @@
     "prepack": "pnpm build"
   },
   "dependencies": {
+    "htmlparser2": "^10.1.0",
     "postal-mime": "^3.0.0",
     "ulid": "^3.0.2",
     "valibot": "^1.2.0"

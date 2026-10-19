@@ -15,7 +15,7 @@ interface NoticeFields {
 }
 
 function fold(text: string): string {
-  return text.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  return text.replace(/[\u00a0\u202f]/g, ' ').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
 }
 
 // Labels are whole lines or colon-delimited. A missing value must not consume
@@ -31,7 +31,7 @@ const FIELD_LABELS = new Set([
 
 function fields(text: string): Map<string, string> {
   const lines = text.replace(/\u00a0|\u202f/g, ' ').replace(/\r/g, '')
-    .replace(/ +-[ \t]+(?=[^\n:]+:)/g, '\n').split('\n')
+    .split('\n')
     .map(line => line.trim().replace(/^-[ \t]+/, '')).filter(Boolean);
   const values = new Map<string, string>();
   for (let i = 0; i < lines.length; i++) {
@@ -98,7 +98,8 @@ function layout(provider: NoticeProvider, text: string, values: Map<string, stri
 }
 
 export function parseBankNotice(text: string, provider: NoticeProvider) {
-  const values = fields(text);
+  text = text.replace(/[\u00a0\u202f]/g, ' ');
+  const values = fields(provider === 'creditas_email' ? text.replace(/ -[ \t]+/g, '\n') : text);
   const config = layout(provider, text, values);
   if (!config) return null;
   const amount = value(values, config.amountLabels)?.match(/^([+-]?[0-9][0-9 .,]*[.,][0-9]{2})\s*(CZK|Kč|Kc|EUR|USD|€)\s*$/i);
