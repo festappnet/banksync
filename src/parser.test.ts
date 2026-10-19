@@ -313,7 +313,7 @@ describe('detectProvider', () => {
   });
 
   it('unknown bank code → unknown', () => {
-    expect(detectProvider('', '123456/0800')).toBe('unknown');
+    expect(detectProvider('', '123456/0100')).toBe('unknown');
   });
 
   it('IBAN with 3030 → airbank_email', () => {

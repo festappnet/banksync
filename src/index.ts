@@ -1,3 +1,4 @@
+export { BANK_ACCOUNT_TYPES, BANK_PROVIDERS, type BankAccountType } from './bankCapabilities.js';
 export {
   BANK_CODES,
   detectProvider,

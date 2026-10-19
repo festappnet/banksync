@@ -1,3 +1,5 @@
+import { BANK_PROVIDERS } from './bankCapabilities.js';
+import { parseBankNotice, type NoticeProvider } from './bankNotices.js';
 import type { Transaction } from './types.js';
 import { normalizeCurrency, toCents, decimalToCents } from './normalize.js';
 
@@ -16,23 +18,18 @@ export const BANK_CODES: Record<string, string> = {
   '2250': 'Banka CREDITAS a.s.',
 };
 
-export type EmailProvider = 'fio_email' | 'airbank_email';
+export type EmailProvider = 'fio_email' | 'airbank_email' | NoticeProvider;
 
 export function detectProvider(
   text: string,
   accountNumber: string | null,
-): 'fio_email' | 'airbank_email' | 'unknown' {
+): EmailProvider | 'unknown' {
   if (accountNumber) {
-    const acc = accountNumber.replace(/\s/g, '');
-    if (acc.includes('/2010')) return 'fio_email';
-    if (acc.includes('/3030')) return 'airbank_email';
-    if (acc.toUpperCase().startsWith('CZ') && acc.length >= 8) {
-      const bankCode = acc.substring(4, 8);
-      if (bankCode === '2010') return 'fio_email';
-      if (bankCode === '3030') return 'airbank_email';
-    }
+    const account = accountNumber.replace(/\s/g, '').toUpperCase();
+    const bank = account.match(/\/([0-9]{4})$/)?.[1]
+      ?? (/^CZ[0-9]{22}$/.test(account) ? account.slice(4, 8) : null);
+    if (bank) return BANK_PROVIDERS[bank as keyof typeof BANK_PROVIDERS]?.emailProvider ?? 'unknown';
   }
-  // Keyword fallback — festapp uses bankType; here we inspect the email body
   if (/fio/i.test(text)) return 'fio_email';
   if (/air\s*bank/i.test(text)) return 'airbank_email';
   return 'unknown';
@@ -388,5 +385,20 @@ export function parseEmail(
     } satisfies ParsedEmailTransaction;
   }
 
-  return null;
+  const notice = parseBankNotice(text, provider);
+  if (!notice) return null;
+  const { dateText, ...facts } = notice;
+  return {
+    ...facts,
+    bank_name: facts.bank_code ? BANK_CODES[facts.bank_code] ?? null : null,
+    ...(dateText ? parseDateToUTC(dateText) : { date: null, date_offset_min: null }),
+    raw_vs: facts.vs,
+    direction: facts.amount_cents > 0 ? 'incoming' : facts.amount_cents < 0 ? 'outgoing' : 'zero',
+    identity_kind: 'observation',
+    identity_provenance: 'authenticated_email_unverified_movement',
+    source: 'email',
+    transaction_id: null, external_id: null, command_id: null,
+    user_identification: null, transaction_type: null, performed_by: null,
+    comment: null, payer_reference: null,
+  } satisfies ParsedEmailTransaction;
 }

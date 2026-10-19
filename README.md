@@ -3,7 +3,8 @@
 Czech bank emails and Fio API transactions, delivered as signed webhooks.
 
 Runs on Cloudflare Workers with D1, Queues and encrypted recovery in R2.
-Supports Fio API, Fio emails and Air Bank emails. BankSync authenticates,
+Supports Fio API and notification emails from Fio, Air Bank, ČSOB, MONETA,
+CREDITAS, Raiffeisenbank, UniCredit and Česká spořitelna. BankSync authenticates,
 deduplicates and retries delivery; your application handles payment matching.
 
 ## Install
@@ -19,6 +20,7 @@ See the [webhook example](docs/guide.md#webhook-contract) and
 
 ## Documentation
 
+- [Supported notification formats](docs/bank-email-formats.md)
 - [Integration and webhook example](docs/guide.md)
 - [Deploy the Worker](docs/operations.md#deploy-the-worker) - Node.js 20+, pnpm and Cloudflare
 - [Security and rollout](docs/security-hardening-rollout.md)

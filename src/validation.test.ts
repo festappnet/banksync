@@ -499,3 +499,9 @@ describe('Type inference', () => {
     expect(input3).toBeDefined();
   });
 });
+
+describe('notification-only bank account providers', () => {
+  it.each(['CSOB', 'MONETA', 'CREDITAS', 'RAIFFEISENBANK', 'UNICREDIT', 'CSAS'])('accepts %s for email provisioning', account_type => {
+    expect(v.parse(CreateBankAccountSchema, { account_number: '123456/0800', owner_app_id: 'festapp', account_type, ingest_mode: 'email' })).toMatchObject({ account_type, ingest_mode: 'email' });
+  });
+});

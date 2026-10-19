@@ -1,3 +1,4 @@
+import type { BankAccountType } from './bankCapabilities.js';
 import {schemaCapabilities, SUPPORTED_SCHEMA_VERSIONS} from './schemaCapabilities';
 import {RECOVERY_WRITES_ALLOWED} from './recoveryMaintenance';
 import {getOperationsStatus,recordStorageSample,type OperationsStatus} from './operationsStatus';
@@ -99,7 +100,7 @@ RETURNING ${BANK_ACCOUNT_PUBLIC_COLS}
 
 export async function createBankAccount(db: D1Database, args: {
   account_number: string;
-  account_type?: 'FIO' | 'AIRBANK';
+  account_type?: BankAccountType;
   ingest_mode?: 'email' | 'api' | 'both';
   pairing_code: string;
   label?: string;
@@ -157,7 +158,7 @@ RETURNING ${BANK_ACCOUNT_PUBLIC_COLS}
 
 export async function updateBankAccount(db: D1Database, id: number, patch: {
   account_number?: string | undefined;
-  account_type?: 'FIO' | 'AIRBANK' | undefined;
+  account_type?: BankAccountType | undefined;
   label?: string | null | undefined;
   ingest_mode?: 'email' | 'api' | 'both' | undefined;
 }): Promise<BankAccount | null> {
