@@ -1968,6 +1968,22 @@ describe('authenticated encrypted email spool',()=>{
     } as unknown as NonNullable<Env['BACKUPS']>;
     return {objects,binding};
   }
+  it.each([[13,true],[13,false],[14,true],[14,false]] as const)('completes Air Bank blocked-funds notices on schema %i with registered account=%s without a payment',async(version,registered)=>{
+    const {db,sqlite}=operationsDb(version);const queueSend=vi.fn();const env=makeEnv(db,queueSend);const storage=bucket();
+    env.AUTHENTICATED_EMAIL_SPOOL='on';env.BACKUPS=storage.binding;
+    if(registered)sqlite.exec("INSERT INTO bank_accounts(id,account_number,account_type,pairing_code,ingest_mode) VALUES(1,'123456789/3030','AIRBANK','abcdef0123','email')");
+    const mime=`From: info@airbank.cz\r\nTo: abcdef0123@banksync.festapp.net\r\nSubject: Zvýšení zůstatku na účtu Běžný účet\r\nMessage-ID: <release-notice@example.test>\r\nAuthentication-Results: mx.cloudflare.net; dkim=pass header.d=airbank.cz\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nDobrý den,
+Uvolnění blokovaných peněz
+Částka: 1 500,00 CZK
+Datum uvolnění peněz: 20.10.2026
+Vaše Air Bank`;
+    await processEmail(makeStream(mime),env);
+    expect(sqlite.prepare('SELECT state,cipher,key_version FROM authenticated_email_spool').get()).toEqual({state:'completed',cipher:null,key_version:null});
+    expect(sqlite.prepare('SELECT count(*) AS n FROM transactions').get()).toEqual({n:0});
+    expect(sqlite.prepare('SELECT error_message,raw_data FROM parse_log').get()).toEqual({error_message:'not_transaction: airbank_notice',raw_data:null});
+    expect(queueSend).not.toHaveBeenCalled();expect(storage.objects.size).toBe(0);
+    sqlite.close();
+  });
   it('survives D1 outage before account lookup and recovers through the scheduled pipeline',async()=>{
     const {db,sqlite}=makeTestDb();const env=makeEnv(db);const storage=bucket();
     env.AUTHENTICATED_EMAIL_SPOOL='on';env.BACKUPS=storage.binding;

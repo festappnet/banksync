@@ -18,6 +18,7 @@ import type { AuthenticatedEmailIdentity } from './email_auth';
 export type EmailOutcome =
   | { kind: 'reject'; reason: string; bankAccountId: number | null; received: boolean }
   | { kind: 'skip'; reason: string; bankAccountId: number; received: true }
+  | { kind: 'skip'; reason: string; bankAccountId: number | null; received: false }
   | { kind: 'insert'; account: BankAccount; parsed: ParsedEmailTransaction; received: true };
 
 /** Pairing code = leading hex label of the To: address (10 hex in prod; {4,32} for tests). */
@@ -54,6 +55,19 @@ function senderAllowed(from: string, allowlist: string[]): boolean {
   return false;
 }
 
+/** A bank notice can change available funds without recording a payment.
+ * Match its own adjacent fields; a payment's booking/execution date takes
+ * precedence over text quoted in a payer-controlled message.
+ */
+function isAirbankNotice(extracted: ExtractedEmail, identity: AuthenticatedEmailIdentity): boolean {
+  if (!identity.sender.toLowerCase().endsWith('@airbank.cz')) return false;
+  const fold = (value: string) => value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\r/g, '').toLowerCase();
+  if (!/^zvyseni zustatku na uctu\b/.test(fold(extracted.subject ?? ''))) return false;
+  const text = fold(extracted.text);
+  if (/^[ \t]*datum (?:zauctovani|provedeni)[ \t]*:/m.test(text)) return false;
+  return /^[ \t]*castka:[^\n]+\n[ \t]*datum uvolneni penez:[ \t]*\d{1,2}\.\d{1,2}\.\d{4}[ \t]*$/m.test(text);
+}
+
 export function classifyEmail(
   extracted: ExtractedEmail,
   identity: AuthenticatedEmailIdentity,
@@ -69,6 +83,13 @@ export function classifyEmail(
   const pairingCode = extractPairingCode(toAddress);
   if (!pairingCode) {
     return { kind: 'reject', reason: `no_pairing_code: ${toAddress}`, bankAccountId: null, received: false };
+  }
+
+  // This authenticated informational notice needs no registered payment
+  // account. Preserve ordinary unknown-recipient quarantine for payment mail.
+  if ((!account || account.account_type === 'AIRBANK') && account?.ingest_mode !== 'api'
+      && isAirbankNotice(extracted, identity)) {
+    return { kind: 'skip', reason: 'not_transaction: airbank_notice', bankAccountId: account?.id ?? null, received: false };
   }
 
   // Step 6: bank account must exist for this pairing code

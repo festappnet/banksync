@@ -139,3 +139,36 @@ describe('classifyEmail — transaction stage (received)', () => {
     }
   });
 });
+
+const airbankBalanceRelease = `Dobrý den,
+zůstatek na účtu Běžný účet číslo 123456789/3030 se zvýšil o částku 1 500,00 CZK.
+Pro úplnost uvádíme detaily této úhrady:
+Uvolnění blokovaných peněz
+Částka: 1 500,00 CZK
+Datum uvolnění peněz: 20.10.2026
+Zpráva pro odesílatele: Bankovní oznámení
+Vaše Air Bank`;
+
+describe('Air Bank non-transactional notices', () => {
+  const email = () => mkEmail({subject:'Zvýšení zůstatku na účtu Běžný účet',
+    fromHeader:'info@airbank.cz',text:airbankBalanceRelease});
+  const account = () => mkAccount({account_number:'123456789/3030',account_type:'AIRBANK'});
+  it.each([true,false])('skips an authenticated notice with registered account=%s', registered => {
+    expect(classify(email(),registered?account():null,['@airbank.cz'])).toEqual({
+      kind:'skip',reason:'not_transaction: airbank_notice',bankAccountId:registered?7:null,received:false,
+    });
+  });
+  it('keeps the sender allowlist and recipient shape gates', () => {
+    expect(classify(email(),account(),['@fio.cz'])).toMatchObject({kind:'reject',reason:'sender_not_allowed'});
+    expect(classify({...email(),toHeader:'unrouted@example.test'},null,['@airbank.cz'])).toMatchObject({kind:'reject',reason:expect.stringMatching(/^no_pairing_code:/)});
+  });
+  it('does not suppress a real payment carrying a notice phrase in its message', () => {
+    const text=`Částka: 25,00 CZK\nDatum zaúčtování: 20.10.2026\nZpráva pro příjemce: ${airbankBalanceRelease}`;
+    expect(classify({...email(),text},account(),['@airbank.cz']).kind).toBe('insert');
+  });
+  it('does not ignore an unrecognized missing-date payment or an unknown account payment', () => {
+    const payment={...email(),text:airbankBalanceRelease.replace('Datum uvolnění peněz: 20.10.2026','Datum: 20.10.2026')};
+    expect(classify(payment,account(),['@airbank.cz']).kind).toBe('insert');
+    expect(classify(payment,null,['@airbank.cz'])).toMatchObject({kind:'reject',reason:expect.stringMatching(/^unknown_pairing_code:/)});
+  });
+});
