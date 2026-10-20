@@ -280,7 +280,8 @@ export async function processEmail(
       await insertParseLog(env.DB, {
         bank_account_id: outcome.bankAccountId ?? null,
         error_message: outcome.reason,
-        raw_data: sanitizeDiagnosticRaw(extracted.text),
+        // Informational notices need only their classification in diagnostics.
+        raw_data: outcome.kind === 'skip' && !outcome.received ? null : sanitizeDiagnosticRaw(extracted.text),
         external_id: extracted.messageId ?? null,
       });
       await completeSpool();

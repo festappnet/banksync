@@ -40,3 +40,10 @@ handling, not authentication or bank movement identity.
 
 The existing configured sender allowlist and authentication gate still apply.
 Adding a parser does not change live routing, allowlists or deployment settings.
+
+Air Bank notices with an adjacent amount and `Datum uvolnění peněz` field are
+classified as non-transactional when sent by the authenticated, allowed bank
+sender with a balance-increase subject. A booking or execution date prevents
+this classification. These notices complete their durable email spool without
+creating a transaction or webhook, including when the recipient has no registered
+payment account. Ordinary unknown-recipient payments remain quarantined.
