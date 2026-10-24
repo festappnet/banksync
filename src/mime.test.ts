@@ -143,3 +143,16 @@ it('extracts visible notification fields without script, style or attribute cont
   expect(result.text).toContain('Částka: 1\u00a0234,56 CZK');
   expect(result.text).not.toMatch(/900|800|unrelated/);
 });
+
+
+it('decodes many adjacent RFC 2047 words without losing the bank subject or body', async () => {
+  // Exercise the input shape from GHSA-f2hq-32vh-53cc through our MIME entrypoint.
+  const words = Array.from({ length: 4096 }, () => '=?UTF-8?B?QQ==?=').join(' ');
+  const result = await extractEmailBody(toStream(makeRaw({
+    subject: words,
+    body: 'Částka: 1 234,56 CZK',
+  })));
+  expect(result.subject).toBe('A'.repeat(4096));
+  expect(result.text).toContain('Částka: 1 234,56 CZK');
+  expect(result.fromHeader).toBe('noreply@fio.cz');
+});

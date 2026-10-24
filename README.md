@@ -22,7 +22,7 @@ See the [webhook example](docs/guide.md#webhook-contract) and
 
 - [Supported notification formats](docs/bank-email-formats.md)
 - [Integration and webhook example](docs/guide.md)
-- [Deploy the Worker](docs/operations.md#deploy-the-worker) - Node.js 20+, pnpm and Cloudflare
+- [Deploy the Worker](docs/operations.md#deploy-the-worker) - Node.js 20.19+, pnpm and Cloudflare
 - [Security and rollout](docs/security-hardening-rollout.md)
 - [npm package](https://www.npmjs.com/package/@festapp/banksync) and [releases](https://github.com/festappnet/banksync/releases)
 
