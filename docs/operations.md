@@ -6,7 +6,7 @@ incremental polling and bounded recovery require schema 13.
 
 ## Deploy the Worker
 
-You need Node.js 20+, pnpm, and Cloudflare Workers, D1, Queues and Email Routing.
+You need Node.js 20.19+, pnpm, and Cloudflare Workers, D1, Queues and Email Routing.
 Use R2 for authenticated email recovery and encrypted backups.
 
 1. Run `pnpm install`. Copy `wrangler.example.toml` to `wrangler.toml` and replace
