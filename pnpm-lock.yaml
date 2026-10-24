@@ -17,8 +17,8 @@ importers:
         specifier: ^10.1.0
         version: 10.1.0
       postal-mime:
-        specifier: ^3.0.0
-        version: 3.0.0
+        specifier: ^4.0.8
+        version: 4.1.4
       ulid:
         specifier: ^3.0.2
         version: 3.0.2
@@ -1184,8 +1184,9 @@ packages:
   pkg-types@1.3.1:
     resolution: {integrity: sha512-/Jm5M4RvtBFVkKWRu2BLUTNP8/M2a+UwuAX+ae4770q1qVGtfjG+WTCupoZixokjmHiry8uI+dlY8KXYV5HVVQ==}
 
-  postal-mime@3.0.0:
-    resolution: {integrity: sha512-Z4a9ar2Bv3YpK3IXag+Yda30k7bMZfpRuUGyqtHnZ2pjHG8Bl62EhZIk4n1dzv00gfzP9g+94e9kd8+XmjVWLA==}
+  postal-mime@4.1.4:
+    resolution: {integrity: sha512-+6Qsn7Q2TSLMScfN4X2VQIclPRKgDAtKhytQex3fVSV/+HgVaawtsQGzKYDQLQIBR7b4Vfg+88WRGvuF/kwLSw==}
+    engines: {node: '>=20'}
 
   postcss-load-config@6.0.1:
     resolution: {integrity: sha512-oPtTM4oerL+UXmx+93ytZVN82RrlY/wPUV8IeDxFrzIjXOLF1pN+EmKPLbubvKHT2HC20xXsCAH2Z+CKV6Oz/g==}
@@ -2261,7 +2262,7 @@ snapshots:
       mlly: 1.8.2
       pathe: 2.0.3
 
-  postal-mime@3.0.0: {}
+  postal-mime@4.1.4: {}
 
   postcss-load-config@6.0.1(postcss@8.5.29):
     dependencies:
