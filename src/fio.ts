@@ -71,6 +71,20 @@ export interface FioProxyConfig {
 
 type FioOp = 'transactions' | 'set-last-date' | 'set-last-id' | 'periods';
 
+/** Created only at the network/body-read boundary, never inferred from an arbitrary TypeError. */
+export class FioTransportError extends Error {
+  readonly code: string;
+  constructor(error: unknown, readonly observation: {
+    operation?: 'transactions' | 'periods'; transport: 'direct' | 'proxy'; http_status?: number;
+  }) {
+    super(error instanceof Error ? error.message : 'fio_transport_failed');
+    this.code = error instanceof Error && ['TimeoutError', 'AbortError', 'TypeError'].includes(error.name)
+      ? error.name : 'bank_sync_internal_error';
+    this.name = this.code;
+  }
+}
+
+
 async function fioRequest(
   op: FioOp,
   token: string,
@@ -80,15 +94,23 @@ async function fioRequest(
   toDate?: string,
   movementId?: string,
 ): Promise<Response> {
-  if (proxy?.url && proxy.secret) {
-    return fetch(proxy.url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-fio-proxy-secret': proxy.secret },
-      body: JSON.stringify({op,token,...(date === undefined ? {} : {date}),...(toDate === undefined ? {} : {toDate}),...(movementId === undefined ? {} : {id:movementId})}),
-      signal: AbortSignal.timeout(55_000),
-    });
+  const observation = {
+    ...(op === 'transactions' || op === 'periods' ? {operation: op} : {}),
+    transport: proxy?.url && proxy.secret ? 'proxy' as const : 'direct' as const,
+  };
+  try {
+    if (proxy?.url && proxy.secret) {
+      return await fetch(proxy.url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-fio-proxy-secret': proxy.secret },
+        body: JSON.stringify({op,token,...(date === undefined ? {} : {date}),...(toDate === undefined ? {} : {toDate}),...(movementId === undefined ? {} : {id:movementId})}),
+        signal: AbortSignal.timeout(55_000),
+      });
+    }
+    return await fetch(directUrl, {signal: AbortSignal.timeout(55_000)});
+  } catch (error) {
+    throw new FioTransportError(error, observation);
   }
-  return fetch(directUrl, {signal: AbortSignal.timeout(55_000)});
 }
 
 function retryAfterSeconds(headers: Headers): number | null {
@@ -142,18 +164,44 @@ export interface FioStatement {
   transactions: FioTransaction[];
 }
 
-async function readFioStatement(response: Response): Promise<FioStatement> {
-  const document = await response.json() as {accountStatement?: {info?:Record<string,unknown>; transactionList?:{transaction?:FioTransaction[]|FioTransaction}}};
-  const statement = document.accountStatement;
-  if (!statement?.info || typeof statement.info !== 'object' || Array.isArray(statement.info)) throw new Error('missing_statement_info');
-  const rows = statement.transactionList?.transaction ?? [];
-  return {info:statement.info,transactions:Array.isArray(rows)?rows:[rows]};
+type JsonShape = 'missing' | 'null' | 'array' | 'object' | 'string' | 'number' | 'boolean';
+function jsonShape(value: unknown): JsonShape {
+  if (value === undefined) return 'missing';
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'array';
+  return typeof value as JsonShape;
+}
+
+export class FioResponseError extends Error {
+  constructor(code: 'invalid_statement_json' | 'missing_statement_info', readonly observation: {
+    operation: 'transactions' | 'periods'; transport: 'direct' | 'proxy'; http_status: number;
+    document_shape?: JsonShape; statement_shape?: JsonShape; info_shape?: JsonShape;
+  }) { super(code); }
+}
+
+async function readFioStatement(response: Response, operation: 'transactions' | 'periods', proxy?: FioProxyConfig): Promise<FioStatement> {
+  const context = {operation, transport: proxy?.url && proxy.secret ? 'proxy' as const : 'direct' as const, http_status:response.status};
+  let document: unknown;
+  try { document = await response.json(); }
+  catch (error) {
+    if (error instanceof SyntaxError) throw new FioResponseError('invalid_statement_json',context);
+    throw new FioTransportError(error, context);
+  }
+  const statement = document && typeof document === 'object' && !Array.isArray(document)
+    ? (document as {accountStatement?: unknown}).accountStatement : undefined;
+  const info = statement && typeof statement === 'object' && !Array.isArray(statement)
+    ? (statement as {info?: unknown}).info : undefined;
+  if (!info || typeof info !== 'object' || Array.isArray(info)) throw new FioResponseError('missing_statement_info', {
+    ...context, document_shape:jsonShape(document), statement_shape:jsonShape(statement), info_shape:jsonShape(info),
+  });
+  const rows = (statement as {transactionList?:{transaction?:FioTransaction[]|FioTransaction}}).transactionList?.transaction ?? [];
+  return {info:info as Record<string,unknown>,transactions:Array.isArray(rows)?rows:[rows]};
 }
 
 export async function fetchFioDelta(token: string, proxy?: FioProxyConfig): Promise<FioStatement> {
   const response = await fioRequest('transactions',token,`${endpoint('last',token)}/transactions.json`,proxy);
   await ensureFioResponse(response,proxy);
-  return readFioStatement(response);
+  return readFioStatement(response,'transactions',proxy);
 }
 
 export function fioMovementId(value: unknown): string | null {
@@ -266,5 +314,5 @@ export async function fetchFioStatement(token: string, from: string, to: string,
   if (from > to || Date.parse(to)-Date.parse(from) > 90*86400000) throw new Error('unbounded_statement_window');
   const response = await fioRequest('periods',token,`${endpoint('periods',token)}/${from}/${to}/transactions.json`,proxy,from,to);
   await ensureFioResponse(response, proxy);
-  return readFioStatement(response);
+  return readFioStatement(response,'periods',proxy);
 }

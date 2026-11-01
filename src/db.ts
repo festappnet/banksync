@@ -1,5 +1,6 @@
+import {bankFailureDiagnostic, type BankFailureDiagnostic} from './bankFailure';
 import type { BankAccountType } from './bankCapabilities.js';
-import {schemaCapabilities, SUPPORTED_SCHEMA_VERSIONS} from './schemaCapabilities';
+import {schemaCapabilities, supportsBankFailureDiagnostic, SUPPORTED_SCHEMA_VERSIONS} from './schemaCapabilities';
 import {RECOVERY_WRITES_ALLOWED} from './recoveryMaintenance';
 import {getOperationsStatus,recordStorageSample,type OperationsStatus} from './operationsStatus';
 import type { D1Database } from '@cloudflare/workers-types';
@@ -83,11 +84,17 @@ export async function pairingCodeExists(db: D1Database, pairingCode: string): Pr
   return r !== null;
 }
 
-const SQL_FIND_BANK_ACCOUNT_BY_ID = `SELECT ${BANK_ACCOUNT_PUBLIC_COLS} FROM bank_accounts WHERE id = ?`;
-
 export async function findBankAccountById(db: D1Database, id: number): Promise<BankAccount | null> {
-  const row = await db.prepare(SQL_FIND_BANK_ACCOUNT_BY_ID).bind(id).first<BankAccountRow>();
-  return row ? mapBankAccount(row) : null;
+  const schema = await db.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
+  const hasDiagnostic = supportsBankFailureDiagnostic(schema?.value);
+  // Health and its retained diagnostic must come from the same account snapshot.
+  const row = await db.prepare(`SELECT ${BANK_ACCOUNT_PUBLIC_COLS}${hasDiagnostic ? ', api_last_failure' : ''} FROM bank_accounts WHERE id = ?`)
+    .bind(id).first<Omit<BankAccountRow, 'api_last_failure'> & {api_last_failure?: string | null}>();
+  if (!row) return null;
+  const {api_last_failure, ...account} = row;
+  return mapBankAccount({...account, ...(hasDiagnostic ? {
+    api_last_failure: api_last_failure ? JSON.parse(api_last_failure) as BankFailureDiagnostic : null,
+  } : {})});
 }
 
 const SQL_CREATE_BANK_ACCOUNT = `
@@ -363,7 +370,15 @@ export async function markBankAccountApiFetchSuccess(db: D1Database, id: number,
     .run();
 }
 
-export async function markBankAccountApiFetchFailure(db: D1Database, id: number, error: string): Promise<void> {
+export async function markBankAccountApiFetchFailure(db: D1Database, id: number, error: string, cause?: unknown): Promise<void> {
+  const schema = await db.prepare("SELECT value FROM schema_meta WHERE key='version'").first<{value:string}>();
+  if (supportsBankFailureDiagnostic(schema?.value)) {
+    const diagnostic = bankFailureDiagnostic(cause);
+    await db.prepare("UPDATE bank_accounts SET api_last_fetch_at=datetime('now'),api_last_error=?,api_last_failure=? WHERE id=?")
+      .bind(error.slice(0,500),JSON.stringify(diagnostic),id).run();
+    log('bank_api_fetch_failure', {bank_account_id:id,...diagnostic});
+    return;
+  }
   await db
     .prepare(`UPDATE bank_accounts SET api_last_fetch_at = datetime('now'), api_last_error = ? WHERE id = ?`)
     .bind(error.slice(0, 500), id)

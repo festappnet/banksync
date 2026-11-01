@@ -2103,6 +2103,27 @@ describe('schema11 immediate webhook dispatch',()=>{
       .toEqual({api_last_error:'fio_token_invalid_or_inactive'});
     expect(sqlite.prepare('SELECT count(*) AS n FROM transactions').get()).toEqual({n:0});
   });
+  it('persists safe response diagnostics through the real poll failure and retains them after recovery',async()=>{
+    const {env,sqlite,accountId}=await setup();
+    for (const file of ['0012_payment_references.sql','0013_recovery_operations.sql','0014_retire_payment_reference_allocator.sql','0015_bank_failure_diagnostic.sql'])
+      sqlite.exec(readFileSync(resolve(__dirname,'../migrations',file),'utf8'));
+    env.FIO_PROXY_URL='https://relay.invalid';env.FIO_PROXY_SECRET='private-relay-secret';
+    vi.stubGlobal('fetch',vi.fn(async()=>new Response(JSON.stringify({accountStatement:{transactionList:null,private:'private-bank-data'}}))));
+    const logs=vi.spyOn(console,'log').mockImplementation(()=>{});
+    expect((await adminReq('POST',`/bank-accounts/${accountId}/fio-sync`,env)).status).toBe(500);
+    const failureAccount=await (await adminReq('GET',`/bank-accounts/${accountId}`,env)).json() as any;
+    expect(failureAccount.api_last_failure).toMatchObject({version:1,code:'missing_statement_info',stage:'response_decode',operation:'periods',transport:'proxy',http_status:200,document_shape:'object',statement_shape:'object',info_shape:'missing'});
+    expect(failureAccount.api_last_failure.id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(logs.mock.calls.some(([line])=>String(line).includes(failureAccount.api_last_failure.id))).toBe(true);
+    logs.mockRestore();
+    expect(Number.isFinite(Date.parse(failureAccount.api_last_failure.occurred_at))).toBe(true);
+    expect(JSON.stringify(failureAccount.api_last_failure)).not.toMatch(/private|synthetic|relay.invalid|token|123456/);
+    const {markBankAccountApiFetchSuccess}=await import('./db');
+    await markBankAccountApiFetchSuccess(env.DB,accountId,{backfill_done:true});
+    const recovered=await (await adminReq('GET',`/bank-accounts/${accountId}`,env)).json() as any;
+    expect(recovered.api_last_error).toBeNull();
+    expect(recovered.api_last_failure).toEqual(failureAccount.api_last_failure);
+  });
   it('queues a new v2 webhook before manual import returns without a cron tick',async()=>{
     const {env,accountId,queueSend}=await setup();
     const response=await adminReq('POST',`/bank-accounts/${accountId}/fio-sync`,env);
