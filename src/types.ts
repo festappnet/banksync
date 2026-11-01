@@ -1,3 +1,4 @@
+import type {BankFailureDiagnostic} from './bankFailure';
 export interface BankAccount {
   id: number;
   account_number: string;
@@ -14,6 +15,7 @@ export interface BankAccount {
   api_last_fetch_at: string | null;
   api_last_success_at: string | null;
   api_last_error: string | null;
+  api_last_failure?: BankFailureDiagnostic | null;
   api_backfill_done: boolean;
   created_at: string;
 }

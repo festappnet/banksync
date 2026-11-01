@@ -191,3 +191,30 @@ BankSync no longer allocates application VS. Follow [retirement and retained
 history](payment-references.md) when upgrading from the former optional API.
 Deploy the schema-13/14 compatible issuance-free runtime before migration 0014;
 existing bank/import/delivery contracts remain independent of this old registry.
+
+### Last failed bank poll
+
+Schema 15 (`0015_bank_failure_diagnostic.sql`) adds `api_last_failure` to the
+existing authorized account-detail response. Deploy a schema-14/15-compatible
+runtime first, then apply the additive migration after prerequisite 0014.
+Older schemas omit the field. Current health still uses `api_last_error`;
+successful polling clears that error and retains the last failure for diagnosis.
+One JSON object per account is replaced atomically with each failed poll.
+Account detail reads health and diagnostics from the same database snapshot.
+
+The version-1 diagnostic carries a UUID, UTC timestamp, safe error code and
+stage. Statement decoding adds the request operation, direct/relay route,
+HTTP status and only JSON types for document/accountStatement/info. Neither
+bank response bodies nor URLs, credentials, account values or arbitrary
+exception messages belong in this object. A relay observation cannot establish
+whether the upstream bank or relay generated the malformed response. The UUID
+identifies this stored failure; it is not a distributed trace identifier.
+Transport errors are classified only at the request/body-read boundary and
+include the route and available HTTP status. An interrupted body is not an
+invalid JSON response; an internal TypeError is not evidence of network failure.
+Existing tenant ownership gates apply to reads. This does not backfill earlier
+failures or keep a failure history.
+
+The same safe UUID and metadata are emitted in the structured
+`bank_api_fetch_failure` log after persistence, so operators can correlate the UI
+reference with runtime logs without logging the bank response.

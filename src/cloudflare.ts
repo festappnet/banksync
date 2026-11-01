@@ -572,7 +572,7 @@ async function runBankApiSync(env: Env, account: ApiFetchAccount): Promise<BankA
     };
   } catch (err) {
     if(durableCursor && err instanceof Error && err.message==='bank_poll_busy') return {bank_account_id:account.id,provider:account.account_type,inserted:0,skipped_duplicate:0,skipped_outgoing:0,parse_errors:0,queued_webhooks:0,backfill:isBackfill,deferred:true};
-    await markBankAccountApiFetchFailure(env.DB, account.id, (err instanceof FioTokenInvalidOrInactive || err instanceof FioReceivingAccountMismatch) ? err.code : String(err));
+    await markBankAccountApiFetchFailure(env.DB, account.id, (err instanceof FioTokenInvalidOrInactive || err instanceof FioReceivingAccountMismatch) ? err.code : String(err), err);
     if (err instanceof FioRateLimited) {
       await writeEvent(env.DB, {
         event_type: 'api_rate_limited',
