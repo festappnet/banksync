@@ -153,6 +153,19 @@ async function recoverPeriods(db:D1Database,input:{group:Awaited<ReturnType<type
       .bind(group.hash,group.physical,group.generation,batch.from_date,...proof),
     ...group.aliases.map(alias=>db.prepare(`UPDATE bank_accounts SET api_last_success_at=datetime('now'),api_last_error=NULL,api_backfill_done=1,api_reconciled_through=? WHERE id=? AND ${completed}`)
       .bind(batch.to_date,alias.id,...proof)),
+    // A changed token leaves its non-mutating /periods intent unreachable by
+    // credential-scoped polling. Retire only empty intents fully covered by
+    // this committed import, under the same lease and credential fences.
+    // Saved responses, uncertain /last calls and configured old tokens remain
+    // recovery evidence. A legacy NULL digest cannot prove token retirement.
+    ...group.aliases.map(alias=>db.prepare(`DELETE FROM bank_recovery_batches
+      WHERE bank_account_id=? AND id<>? AND poll_kind='periods'
+      AND state='fetching' AND recovery_stage='fetching' AND cipher IS NULL AND key_version IS NULL AND completion_token IS NULL
+      AND credential_hash IS NOT NULL AND credential_hash<>? AND from_date>=? AND to_date<=?
+      AND NOT EXISTS (SELECT 1 FROM bank_accounts a WHERE a.api_token_hash=bank_recovery_batches.credential_hash
+        OR (a.api_token_cipher IS NOT NULL AND a.api_token_hash IS NULL))
+      AND ${completed} AND ${guard}`)
+      .bind(alias.id,batch.id,group.hash,batch.from_date,batch.to_date,...proof,...values)),
   ]);
   if(results[0]?.meta.changes!==1) throw new Error('bank_poll_lease_lost');
   return {...imported,deferred:true};

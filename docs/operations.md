@@ -61,6 +61,13 @@ Credential changes invalidate in-flight writes. Unexpected receiving accounts,
 changed facts, invalid movements and unexplained cursors leave the batch open.
 Long unresolved gaps require authorized bank-history access.
 
+After a token replacement, a successfully committed history import also retires
+empty `/periods` attempts under an unused old token when its full date range is
+covered. This happens atomically with the import checkpoint, under the same
+lease and credential fences. Saved responses, `/last` attempts, quarantine,
+uncovered dates and tokens still configured on another account remain visible
+to recovery monitoring. No monitoring threshold is relaxed.
+
 ### Email recovery and retention
 
 Retries share a durable claim and use delays of 5 minutes, 15 minutes, 1 hour,
