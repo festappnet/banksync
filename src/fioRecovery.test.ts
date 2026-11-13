@@ -3,6 +3,8 @@ import {operationsDb} from './operationsTestSupport';
 import {recoverFioAccount} from './fioRecovery';
 import {encryptSecret} from './crypto';
 import {findBankAccountApiMaterials,setBankAccountApiToken} from './db';
+import {sha256Hex} from './idempotency';
+import {readOperationsProbe} from './operationsProbe';
 const env={ENCRYPTION_KEY_VERSION:'1',ENCRYPTION_KEY_V1:btoa('a'.repeat(32))};
 afterEach(()=>vi.unstubAllGlobals());
 function response(ids=['101'],marker:string|null=null,end:string|null='101') {
@@ -18,6 +20,51 @@ async function fixture(version:number) {
   return {db,sqlite,run,unlock};
 }
 describe.each([13,14])('canonical credential-wide Fio polling on schema %i',(version)=>{
+  async function replacedToken() {
+    const fixtureState=await fixture(version);
+    const fetch=vi.fn().mockRejectedValueOnce(new Error('lost periods response')).mockImplementation(()=>Promise.resolve(response()));
+    vi.stubGlobal('fetch',fetch);
+    await expect(fixtureState.run()).rejects.toThrow('lost periods response');
+    const original=fixtureState.sqlite.prepare('SELECT id FROM bank_recovery_batches').get() as {id:string};
+    fixtureState.sqlite.exec("UPDATE bank_recovery_batches SET created_at=datetime('now','-2 hours')");
+    const encrypted=await encryptSecret('replacement-token',env),hash=await sha256Hex('replacement-token');
+    for(const id of [1,2]) await setBankAccountApiToken(fixtureState.db,id,{token_cipher:encrypted.cipher,token_key_ver:1,token_prefix:'fixture',token_hash:hash,fetch_enabled:true});
+    fixtureState.unlock();
+    return {...fixtureState,fetch,original};
+  }
+  it('retires an orphaned empty periods intent only after the replacement token imports its entire window',async()=>{
+    const {db,sqlite,run,fetch,original}=await replacedToken();
+    expect((await readOperationsProbe(db)).metrics).toMatchObject({recovery_open:1,recovery_oldest_age_s:expect.any(Number)});
+    await run();
+    expect(fetch.mock.calls[1]![0]).toContain('/periods/replacement-token/');
+    expect(sqlite.prepare('SELECT id FROM bank_recovery_batches WHERE id=?').get(original.id)).toBeUndefined();
+    expect(sqlite.prepare('SELECT count(*) n FROM transactions').get()).toEqual({n:2});
+    expect((await readOperationsProbe(db)).metrics).toMatchObject({recovery_open:0,recovery_quarantined:0});
+  });
+  it.each(['saved response','delta intent','wider window','shared old token','unknown legacy token','quarantine'])(
+    'preserves %s when a replacement periods import completes',async(kind)=>{
+      const {db,sqlite,run,original}=await replacedToken();
+      if(kind==='saved response') sqlite.prepare("UPDATE bank_recovery_batches SET cipher='retained-evidence',key_version=1,state='spooled',recovery_stage='spooled' WHERE id=?").run(original.id);
+      if(kind==='delta intent') sqlite.prepare("UPDATE bank_recovery_batches SET poll_kind='last' WHERE id=?").run(original.id);
+      if(kind==='wider window') sqlite.prepare("UPDATE bank_recovery_batches SET from_date='2020-01-01' WHERE id=?").run(original.id);
+      if(kind==='quarantine') sqlite.prepare("UPDATE bank_recovery_batches SET recovery_stage='quarantined' WHERE id=?").run(original.id);
+      if(kind==='shared old token'||kind==='unknown legacy token') {
+        const encrypted=await encryptSecret('synthetic-token',env);
+        sqlite.prepare(`INSERT INTO bank_accounts(id,account_number,pairing_code,api_token_cipher,api_token_key_ver,api_token_hash)
+          VALUES(3,'1234/2010','preserved-alias',?,1,?)`).run(encrypted.cipher,kind==='shared old token'?await sha256Hex('synthetic-token'):null);
+      }
+      await run();
+      expect(sqlite.prepare('SELECT id FROM bank_recovery_batches WHERE id=?').get(original.id)).toEqual(original);
+      expect((await readOperationsProbe(db)).metrics).toMatchObject({
+        recovery_open:kind==='quarantine'?0:1,recovery_quarantined:kind==='quarantine'?1:0,
+      });
+    });
+  it('retains the old intent when the replacement import fails',async()=>{
+    const {sqlite,run,fetch,original}=await replacedToken();
+    fetch.mockRejectedValueOnce(new Error('replacement unavailable'));
+    await expect(run()).rejects.toThrow('replacement unavailable');
+    expect(sqlite.prepare('SELECT id FROM bank_recovery_batches WHERE id=?').get(original.id)).toEqual(original);
+  });
   it('bootstraps once, resets once, then uses only /last and fans out to both legacy NULL-hash aliases',async()=>{
     const {sqlite,run,unlock}=await fixture(version);const fetch=vi.fn().mockResolvedValueOnce(response()).mockResolvedValueOnce(new Response(''))
       .mockResolvedValueOnce(response()).mockResolvedValueOnce(response(['102'],'101','102'));vi.stubGlobal('fetch',fetch);
