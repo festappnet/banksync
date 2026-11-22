@@ -76,6 +76,16 @@ it('rejects conflicting direction and avoids reading the next label as a missing
   expect(parseEmail(notices[4]!.incoming, 'unicredit_email')?.ss).toBeNull();
 });
 
+it('requires a standalone, unambiguous MONETA direction heading', () => {
+  const amount = 'Částka: 10,00 Kč';
+  expect(parseEmail(['Účet', '  Přišly peníze  ', amount].join('\r\n'), 'moneta_email'))
+    .toMatchObject({ amount_cents: 1000, direction: 'incoming' });
+  expect(parseEmail(['Přišly peníze', 'Odešly peníze', amount].join('\n'), 'moneta_email'))
+    .toBeNull();
+  expect(parseEmail(['Oznámení: Přišly peníze', amount].join('\n'), 'moneta_email'))
+    .toBeNull();
+});
+
 it('rejects malformed thousands grouping without changing the amount', () => {
   expect(parseEmail('právě proběhla transakce\nČástka: 1,23,4.56 CZK', 'unicredit_email')).toBeNull();
 });
