@@ -67,8 +67,13 @@ function layout(provider: NoticeProvider, text: string, values: Map<string, stri
       if (!normalized.includes('parametry platby')) return null;
       return { ...base, dateLabels: ['datum uctovani'], nameLabels: ['nazev protistrany'] };
     case 'moneta_email': {
-      const incoming = /(?:^|\n)\s*prisly penize\s*(?:\n|$)/.test(normalized);
-      const outgoing = /(?:^|\n)\s*odesly penize\s*(?:\n|$)/.test(normalized);
+      let incoming = false;
+      let outgoing = false;
+      for (const line of normalized.split('\n')) {
+        const heading = line.trim();
+        if (heading === 'prisly penize') incoming = true;
+        if (heading === 'odesly penize') outgoing = true;
+      }
       if (incoming === outgoing) return null;
       return { ...base, direction: incoming ? 'incoming' : 'outgoing',
         counterpartyLabels: ['od'], messageLabels: ['popis'] };
