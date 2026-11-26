@@ -1961,7 +1961,10 @@ describe('authenticated encrypted email spool',()=>{
     const objects=new Map<string,string>();
     const binding={
       async head(key:string) {return objects.has(key)?{key}:null;},
-      async put(key:string,value:string) {objects.set(key,value);},
+      async put(key:string,value:string,options?:{onlyIf?:{etagDoesNotMatch?:string}}) {
+        if(options?.onlyIf?.etagDoesNotMatch==='*' && objects.has(key)) return null;
+        objects.set(key,value);
+      },
       async get(key:string) {const value=objects.get(key);return value===undefined?null:{async text(){return value;}};},
       async delete(key:string) {objects.delete(key);},
       async list() {return {objects:[...objects.keys()].map(key=>({key})),truncated:false};},
@@ -1984,6 +1987,31 @@ Vaše Air Bank`;
     expect(queueSend).not.toHaveBeenCalled();expect(storage.objects.size).toBe(0);
     sqlite.close();
   });
+  it.each([false,true])('retries transient R2 failures when the first write committed=%s', async (firstWriteCommitted) => {
+    const {db,sqlite}=operationsDb();
+    const env=makeEnv(db);
+    const storage=bucket();
+    env.AUTHENTICATED_EMAIL_SPOOL='on';
+    env.BACKUPS=storage.binding;
+    const {pairingCode}=await seedFullSetup(db,sqlite);
+    const head=vi.spyOn(storage.binding,'head').mockRejectedValue(
+      new Error('head: We encountered an internal error. Please try again. (10001)'));
+    const write=storage.binding.put.bind(storage.binding);
+    const put=vi.spyOn(storage.binding,'put').mockImplementationOnce(async (key,value,options)=>{
+      if(firstWriteCommitted) await write(key,value,options);
+      throw new Error('put: We encountered an internal error. Please try again. (10001)');
+    });
+    await processEmail(makeStream(buildFioEmail(`${pairingCode}@banksync.festapp.net`)),env);
+    expect(head).not.toHaveBeenCalled();
+    expect(put).toHaveBeenCalledTimes(2);
+    expect(put.mock.calls[1]?.[0]).toBe(put.mock.calls[0]?.[0]);
+    expect(put.mock.calls[1]?.[2]).toEqual({onlyIf:{etagDoesNotMatch:'*'}});
+    expect(sqlite.prepare('SELECT count(*) AS n FROM transactions').get()).toEqual({n:1});
+    expect(sqlite.prepare('SELECT count(*) AS n FROM parse_log').get()).toEqual({n:0});
+    expect(storage.objects.size).toBe(0);
+    sqlite.close();
+  });
+
   it('survives D1 outage before account lookup and recovers through the scheduled pipeline',async()=>{
     const {db,sqlite}=makeTestDb();const env=makeEnv(db);const storage=bucket();
     env.AUTHENTICATED_EMAIL_SPOOL='on';env.BACKUPS=storage.binding;

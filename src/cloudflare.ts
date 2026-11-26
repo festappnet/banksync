@@ -220,8 +220,19 @@ export async function processEmail(
       if(!env.BACKUPS) throw new Error('authenticated_spool_binding_required');
       const encrypted=await encryptSecret(JSON.stringify({bytesBase64,envelope}),env);
       r2SpoolKey=`authenticated-email-pending/${await sha256Hex(`${identity.recipient}:${bytesBase64}`)}`;
-      const existing=await env.BACKUPS.head(r2SpoolKey);
-      if(!existing) await env.BACKUPS.put(r2SpoolKey,JSON.stringify(encrypted));
+      const payload=JSON.stringify(encrypted);
+      // A lost response can follow a successful write. Preserve the first copy
+      // of this authenticated message when another delivery or retry already stored it.
+      const condition={onlyIf:{etagDoesNotMatch:'*'}};
+      for(const retryDelayMs of [125,500,0]) {
+        try {
+          await env.BACKUPS.put(r2SpoolKey,payload,condition);
+          break;
+        } catch(error) {
+          if(!retryDelayMs||!(error instanceof Error)||!/\((10001|10043)\)$/.test(error.message)) throw error;
+          await new Promise(resolve=>setTimeout(resolve,retryDelayMs));
+        }
+      }
     }
 
     if(await recoveryMaintenanceEnabled(env.DB)) {
